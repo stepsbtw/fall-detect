@@ -1,3 +1,7 @@
+__pycache__/
+database/
+labels_and_data/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
