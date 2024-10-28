@@ -188,8 +188,7 @@ if __name__ == "__main__":
         epochs, learning_rate, model, train_dl, val_dl, loss_fn)
 
     # Plotagem do gráfico de perda
-    category = "binary" if num_labels == 2 else "multiclass"
-    plot_loss_curve(train_loss, valid_loss, neural_network_results_dir,
-                    f"CNN1D_{category}_{position}_{scenario}.png")
+    category = "bin" if num_labels == 2 else "multi"
+    plot_loss_curve(train_loss, valid_loss, neural_network_results_dir, f"{neural_network_type}_{category}_{str(learning_rate)}_{position}_{scenario}.png")
     print(
         f"Gráfico de Perda gerado com sucesso. (Verifique o diretório {neural_network_results_dir})")
