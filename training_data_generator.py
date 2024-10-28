@@ -3,8 +3,7 @@
 
 import argparse
 import os
-from builders.data_training_builders import (
-    sort_by_number, get_file_path, create_dataframe, create_directory_if_does_not_exist)
+from builders.data_training_builders import (sort_by_number, get_file_path, create_dataframe, create_directory_if_does_not_exist)
 from builders.data_training_generators import generate_activities
 import numpy as np
 
