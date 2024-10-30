@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 
+
 class CNN1D(nn.Module):
-    def __init__(self, input_shape, n_conv_layers, first_conv_layer_size,  num_dense_layers, first_dense_layer_size,  num_labels):
+    def __init__(self, input_shape, n_conv_layers, first_conv_layer_size,  num_dense_layers, first_dense_layer_size,  num_labels=2):
         super(CNN1D, self).__init__()
 
         # filter_size = 50
@@ -15,6 +16,7 @@ class CNN1D(nn.Module):
         # decision_threshold = 0.5
 
         self.conv_layer = nn.ModuleList()
+        
         # Hiperparametros definidos de forma fixa
         self.kernel_size = 3
         self.dropout_rate = 0.3
@@ -103,39 +105,40 @@ class CNN1D(nn.Module):
         # print("Argmax:", x.shape)
         return x
 
-class CustomMLP(nn.Module):
-    def __init__(self, input_shape,  num_labels=1):
-        super(CustomMLP, self).__init__()
-        self.layers = nn.ModuleList()
-        
-        # Recebe como entrada input_shape tuple(N_observ, N_vari)
-        
-        # Caso Multivariado (N_vari > 1) - Add um flatten
-        if input_shape[1] > 1:
-            self.layers.append(nn.Flatten())
-        
-        input_shape = input_shape[0] * input_shape[1]
-        
-        
-        
-        for i in range(2):
-            self.layers.append(nn.Linear(in_features=input_shape, out_features=input_shape*2))
-            input_shape *= 2
-            
-        # for i in range(7):
-        #     self.layers.append(
-        #         nn.Linear(in_features=input_shape, out_features=input_shape//2))
-        #     input_shape //= 2
 
-		# Classificação binária -> Saida em um único neurônio
+class CustomMLP(nn.Module):
+    def __init__(self, input_shape, num_asc_layers=2, num_desc_layers=1, num_labels=1):
+        super(CustomMLP, self).__init__()
+        
+        # Taxa de crescimento entre camadas
+        self.asc_factor = 2
+        # Taxa de decrescimento entre camadas
+        self.desc_factor = 3
+        
+        self.layers = nn.ModuleList()
+
+        # Recebe como entrada input_shape tuple(N_observ, N_vari)
+        # Caso Multivariado (N_vari > 1) - Add um flatten
+        if input_shape[1] > 1: self.layers.append(nn.Flatten())
+
+        input_shape = input_shape[0] * input_shape[1]
+
+        for i in range(num_asc_layers):
+            self.layers.append(
+                nn.Linear(in_features=input_shape, out_features=input_shape * self.asc_factor))
+            input_shape *= self.asc_factor
+
+        for i in range(num_desc_layers):
+            self.layers.append(nn.Linear(in_features=input_shape, out_features=input_shape // self.desc_factor))
+            input_shape //= self.desc_factor
+
+            # Classificação binária -> Saida em um único neurônio
         self.output_layer = nn.Linear(in_features=input_shape, out_features=num_labels)
 
     def forward(self, x):
 
         for i, layer in enumerate(self.layers):
             x = nn.functional.relu(layer(x))
-            # x = layer(x)
-            
         x = self.output_layer(x)
 
         return x

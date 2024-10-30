@@ -36,12 +36,10 @@ def generate_datasets(data: str = None, label: str = None):
     X = torch.from_numpy(X)
     y = torch.from_numpy(y)
 
-    # 40% para treinamento
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.4, random_state=42)
-    # 30% + 30% para validação e teste
-    X_test, X_val, y_test, y_val = train_test_split(
-        X_test, y_test, test_size=0.5, random_state=42)
+    # 60% para treinamento
+    X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=0.6, random_state=101)
+    # 20% + 20% para validação e teste
+    X_test, X_val, y_test, y_val = train_test_split(X_test, y_test, test_size=0.4, random_state=101)
 
     # É necessário "pivotar" o datset devido a forma como o pytorch interpreta as camadas dos tensores ([batch, features, passo_de tempo])
     X_train = torch.permute(X_train, (0, 2, 1))
@@ -113,7 +111,7 @@ def parse_input():
     return args.position, args.label_type, args.scenario, args.neural_network_type, args.n_conv, args.n_dense
 
 
-def collect_datasets_from_input(position, target_type, scenario, neural_network_type, label_dir, data_dir):
+def collect_datasets_from_input(position, target_type, scenario, label_dir, data_dir):
 
     array_size = array_sizes[position]
 
