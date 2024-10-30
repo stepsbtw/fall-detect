@@ -23,7 +23,7 @@ def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Ada
     avg_valid_losses = []
 
     optimizer = opt_func(model.parameters(), lr)
-    
+
     for epoch in range(epochs):
 
         ###################
@@ -65,18 +65,16 @@ def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Ada
 
         # print training/validation statistics
         # calculate average loss over an epoch
-        
+
         train_loss = np.average(train_losses)
         valid_loss = np.average(valid_losses)
-        
-        epoch_len = len(str(epochs))
-        
-        print(f"[{epoch+1:>{epoch_len}}/{epochs:>{epoch_len}}] " +
-                     f"train_loss: {train_loss:.4f} " +
-                     f"valid_loss: {valid_loss:.4f}")
 
-        
-        
+        epoch_len = len(str(epochs))
+
+        print(f"[{epoch+1:>{epoch_len}}/{epochs:>{epoch_len}}] " +
+              f"train_loss: {train_loss:.4f} " +
+              f"valid_loss: {valid_loss:.4f}")
+
         avg_train_losses.append(train_loss)
         avg_valid_losses.append(valid_loss)
 
@@ -84,6 +82,16 @@ def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Ada
         valid_losses = []
 
     return model, avg_train_losses, avg_valid_losses
+
+
+def generate_batches(X_train, y_train, X_val, y_val):
+    train_ds = TensorDataset(X_train, y_train)
+    val_ds = TensorDataset(X_val, y_val)
+
+    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False)
+    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
+
+    return train_dl, val_dl
 
 
 if __name__ == "__main__":
@@ -137,22 +145,15 @@ if __name__ == "__main__":
     # --------------------------------------------------------------------------------------------------------------------
 
     print("Datasets | Labels")
-    print(
-        f"Treinamento: {X_train.shape} ({X_train.dtype}) | {y_train.shape} ({y_train.dtype})")
-    print(
-        f"Validação: {X_val.shape} ({X_val.dtype}) | {y_val.shape} ({y_val.dtype})")
-    print(
-        f"Teste: {X_test.shape} ({X_test.dtype}) | {y_test.shape} ({y_test.dtype})")
+    print(f"Treinamento: {X_train.shape} | {y_train.shape}")
+    print(f"Validação: {X_val.shape} | {y_val.shape}")
+    print(f"Teste: {X_test.shape} | {y_test.shape}")
 
     # Formação dos batches a partir dos datasets
-    train_ds = TensorDataset(X_train, y_train)
-    val_ds = TensorDataset(X_val, y_val)
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False)
-    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
+    train_dl, val_dl = generate_batches(X_train, y_train, X_val, y_val)
 
     # Definição da Rede Neural
     # model = CNN1D(
-
     #     # Comprimento das features
     #     # Representa 5s de registros de movimentos (450 para os punhos, 1020 para o peito)
     #     input_shape=input_shape,
@@ -167,7 +168,7 @@ if __name__ == "__main__":
     #     num_labels=num_labels  # A depender de uma classificação binária ou multiclasse
     # )
 
-    model = CustomMLP(input_shape, 1)
+    model = CustomMLP(input_shape)
 
     # DEBUG
     if debug:
@@ -175,20 +176,20 @@ if __name__ == "__main__":
         print(model)
         print("-"*90)
 
-    # b = model(X_train[:10].float()).squeeze()
-    # print(b, b.shape)
-    # yb = y_train[:10].float()
-    # print(yb, yb.shape)
-    # loss = loss_fn(b, yb)
-    # loss.backward()
-
     # exit()
     # Treinamento própriamente dito
-    model, train_loss, valid_loss = fit(
-        epochs, learning_rate, model, train_dl, val_dl, loss_fn)
+    model, train_loss, valid_loss = fit(epochs, learning_rate, model,
+                                        train_dl, val_dl, loss_fn)
 
     # Plotagem do gráfico de perda
     category = "bin" if num_labels == 2 else "multi"
-    plot_loss_curve(train_loss, valid_loss, neural_network_results_dir, f"{neural_network_type}_{category}_{str(learning_rate)}_{position}_{scenario}.png")
-    print(
-        f"Gráfico de Perda gerado com sucesso. (Verifique o diretório {neural_network_results_dir})")
+
+    plot_filename = f"{neural_network_type}_{category}_{str(learning_rate)}_{position}_{scenario}.png"
+
+    plot_loss_curve(train_loss, valid_loss,
+                    neural_network_results_dir, plot_filename)
+
+    print(f"Gráfico de Perda gerado com sucesso. (Verifique o diretório {neural_network_results_dir})")
+    
+    
+    

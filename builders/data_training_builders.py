@@ -227,8 +227,7 @@ def create_labels(activity):
     activity_without_rifle = activity.split("_with_rifle")[0]
 
     multiple_class_label_1 = multiple_classes_labels_1.get(activity)
-    multiple_class_label_2 = multiple_classes_labels_2.get(
-        activity_without_rifle)
+    multiple_class_label_2 = multiple_classes_labels_2.get(activity_without_rifle)
     binary_class_label_1 = binary_classes_labels_1.get(activity_without_rifle)
     binary_class_label_2 = binary_classes_labels_2.get(activity_without_rifle)
 

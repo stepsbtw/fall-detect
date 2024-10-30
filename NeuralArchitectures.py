@@ -104,19 +104,20 @@ class CNN1D(nn.Module):
         return x
 
 class CustomMLP(nn.Module):
-    def __init__(self, input_shape, num_labels):
+    def __init__(self, input_shape,  num_labels=1):
         super(CustomMLP, self).__init__()
-
-        # array_sizes = {"chest": 1020, "right": 450, "left": 450}
-
-        # Recebe como entrada input_shape(int)
-
-        # self.input_layer = nn.Linear(in_features=input_shape, out_features=input_shape)
-        self.n_targets = num_labels
-        
         self.layers = nn.ModuleList()
         
-
+        # Recebe como entrada input_shape tuple(N_observ, N_vari)
+        
+        # Caso Multivariado (N_vari > 1) - Add um flatten
+        if input_shape[1] > 1:
+            self.layers.append(nn.Flatten())
+        
+        input_shape = input_shape[0] * input_shape[1]
+        
+        
+        
         for i in range(2):
             self.layers.append(nn.Linear(in_features=input_shape, out_features=input_shape*2))
             input_shape *= 2
@@ -125,26 +126,16 @@ class CustomMLP(nn.Module):
         #     self.layers.append(
         #         nn.Linear(in_features=input_shape, out_features=input_shape//2))
         #     input_shape //= 2
-            
-        # if self.n_targets == 2:
-        #     self.output_layer = nn.Linear(in_features=input_shape, out_features=1)
-        # else:
-        #     self.output_layer = nn.Linear(in_features=input_shape, out_features=self.n_targets)
+
+		# Classificação binária -> Saida em um único neurônio
         self.output_layer = nn.Linear(in_features=input_shape, out_features=num_labels)
 
     def forward(self, x):
-        # print("Input:", x.shape)
-        # print()
-        # x = self.input_layer(x)
+
         for i, layer in enumerate(self.layers):
             x = nn.functional.relu(layer(x))
-            # print(f"Camada {i}:", x.shape)
+            # x = layer(x)
             
         x = self.output_layer(x)
-        # Para caso binário
-        # Probabilidade de pertencer a classe positiva
-        # x = torch.round(torch.sigmoid(x))
-        # Conversão da probalilidade em 0 ou 1 (limiar de 0.5)
+
         return x
-        # print(x)
-        # print("Argmax:", x.shape)
