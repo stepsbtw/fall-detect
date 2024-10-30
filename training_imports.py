@@ -37,9 +37,11 @@ def generate_datasets(data: str = None, label: str = None):
     y = torch.from_numpy(y)
 
     # 60% para treinamento
-    X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=0.6, random_state=101)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, train_size=0.6, random_state=101)
     # 20% + 20% para validação e teste
-    X_test, X_val, y_test, y_val = train_test_split(X_test, y_test, test_size=0.4, random_state=101)
+    X_test, X_val, y_test, y_val = train_test_split(
+        X_test, y_test, test_size=0.4, random_state=101)
 
     # É necessário "pivotar" o datset devido a forma como o pytorch interpreta as camadas dos tensores ([batch, features, passo_de tempo])
     X_train = torch.permute(X_train, (0, 2, 1))
@@ -139,22 +141,22 @@ def collect_datasets_from_input(position, target_type, scenario, label_dir, data
         "Sc_3_F": [os.path.join(data_dir, "magacc_and_maggyr_frequency_domain_data_array.npy"), (int(array_size/2), 2)],
         "Sc_4_F": [os.path.join(data_dir, "acc_and_gyr_three_axes_frequency_domain_data_array.npy"), (int(array_size/2), 6)],
     }
-    
- 	# O nome do arquivo de dados e o formato de entrada da RN será definido de acordo com neural_network_scenarios.
-    
+
+    # O nome do arquivo de dados e o formato de entrada da RN será definido de acordo com neural_network_scenarios.
+
     label_filename, label_size = targets_filename_and_size.get(target_type)
     data_filename, input_shape = neural_network_scenarios[scenario]
 
     #  O arquivo de targets é label_dir + label_filename
     label_path = os.path.join(label_dir, label_filename)
 
-    X_train, y_train, X_val, y_val, X_test, y_test = generate_datasets(data_filename, label_path)
+    X_train, y_train, X_val, y_val, X_test, y_test = generate_datasets(
+        data_filename, label_path)
 
     return input_shape, label_size, X_train, y_train, X_val, y_val, X_test, y_test
 
 
-def plot_loss_curve(train_loss: list, valid_loss: list, image_dir: str = "./", filename: str = "plot_loss_curve"):
-    import os
+def save_loss_curve(train_loss: list, valid_loss: list, image_dir: str = "./", filename: str = "plot_loss_curve"):
     fig = plt.figure(figsize=(10, 8))
     plt.plot(range(1, len(train_loss)+1), train_loss, label="Training Loss")
     plt.plot(range(1, len(valid_loss)+1), valid_loss, label="Validation Loss")
@@ -165,9 +167,11 @@ def plot_loss_curve(train_loss: list, valid_loss: list, image_dir: str = "./", f
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-
+    
     path = os.path.join(image_dir, filename)
     fig.savefig(path, bbox_inches="tight")
+    
+    return True
 
 # Funções não utilizadas voltadas p otimização de hiperparametros
 

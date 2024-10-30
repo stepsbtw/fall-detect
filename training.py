@@ -10,6 +10,39 @@ from NeuralArchitectures import CustomMLP, CNN1D
 from sklearn.metrics import classification_report
 
 BATCH_SIZE = 32
+# Hiperparams definidos de forma arbitrária -> Impactam diretamente na potência e no tempo de treinamento
+# Taxa de Aprendizagem
+learning_rate = 0.01
+
+first_conv_layer_size = 25
+first_dense_layer_size = 6000
+
+
+def get_class_report(model):
+    model.eval()
+    # Listas para armazenar todos os rótulos verdadeiros e predições
+    all_labels = []
+    all_predictions = []
+
+    # Para economizar memória e tempo
+    with torch.no_grad():
+        for inputs, labels in test_dl:
+            # A saida é uma logit, então tem que aplicar sigmoide
+            outputs = model(inputs.float())
+
+            # Conversão em probabilidades
+            probabilities = torch.sigmoid(outputs.squeeze())
+
+            # Limiar para converter probabilidades em predições binárias - se >= 0.5: 1. Do contrário, 0
+            predicted = (probabilities >= 0.5).int()
+
+            # Armazena as predições e os rótulos verdadeiros
+            all_predictions.extend(predicted.numpy())
+            all_labels.extend(labels.numpy())
+
+    # Calcula e exibe o relatório de classificação
+    report = classification_report(all_labels, all_predictions)
+    return report
 
 
 def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Adam):
@@ -97,6 +130,18 @@ def generate_batches(X_train, y_train, X_val, y_val, X_test, y_test):
     return train_dl, val_dl, test_dl
 
 
+def create_result_dir():
+    output_dir = os.path.join(current_directory, "output")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    nn_results_dir = os.path.join(output_dir, neural_network_type, position)
+    if not os.path.exists(nn_results_dir):
+        os.makedirs(nn_results_dir)
+
+    return nn_results_dir
+
+
 if __name__ == "__main__":
 
     debug = True
@@ -105,31 +150,16 @@ if __name__ == "__main__":
 
     # Nº de Epochs
     epochs = 10
-    # Taxa de Aprendizagem
-    learning_rate = 0.01
 
     # Função de Custo - BCELoss()??
     loss_fn = nn.BCEWithLogitsLoss()
 
-    # Hiperparams definidos de forma arbitrária -> Impactam diretamente na potência e no tempo de treinamento
-    first_conv_layer_size = 25
-    first_dense_layer_size = 6000
-
     position, label_type, scenario, neural_network_type, n_conv_layers, num_dense_layers = parse_input()
 
-    output_dir = os.path.join(current_directory, "output")
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    neural_network_results_dir = create_result_dir(
+        current_directory, neural_network_type, position)
 
-    neural_network_results_dir = os.path.join(output_dir, neural_network_type)
-    if neural_network_type == "CNN1D":
-        neural_network_results_dir = os.path.join(
-            neural_network_results_dir, position)
-
-    if not os.path.exists(neural_network_results_dir):
-        os.makedirs(neural_network_results_dir)
-
-    # Diretórios dos datasets e tragets. position -> labels_and_data/data/{position}/filename.npy
+    # Path dos datasets e targets. position -> labels_and_data/data/{position}/filename.npy
     data_dir = os.path.join(
         current_directory, "labels_and_data", "data", position)
     label_dir = os.path.join(
@@ -138,18 +168,12 @@ if __name__ == "__main__":
     input_shape, num_labels, X_train, y_train, X_val, y_val, X_test, y_test, = collect_datasets_from_input(
         position, label_type, scenario, label_dir, data_dir)
 
-    # --------------------------------------------------------------------------------------------------------------------
-    # Coleta de uma pequena amostra do dataset para treinamento parcial
-    # i_train = -1
-    # i_val = -1
-    # X_train, y_train = X_train[:i_train], y_train[:i_train]
-    # X_val, y_val = X_val[:i_val], y_val[:i_val]
-    # --------------------------------------------------------------------------------------------------------------------
-
     print("Datasets | Labels")
     print(f"Treinamento: {X_train.shape} | {y_train.shape}")
     print(f"Validação: {X_val.shape} | {y_val.shape}")
     print(f"Teste: {X_test.shape} | {y_test.shape}")
+
+    # TODO: Aqui poderia ser feito um porcesso de sintetização de dados de queda
 
     # Formação dos batches a partir dos datasets
     train_dl, val_dl, test_dl = generate_batches(
@@ -173,54 +197,31 @@ if __name__ == "__main__":
         )
 
     if model is None:
-        exit(1)
+        raise Exception("Por algum motivo o modelo não pode ser construido")
 
-    # DEBUG
-    if debug:
-        print("-"*90)
-        print(model)
-        print("-"*90)
+    print("-" * 90)
+    print(model)
+    print("-" * 90)
 
     # Treinamento própriamente dito
     model, train_loss, valid_loss = fit(epochs, learning_rate, model,
                                         train_dl, val_dl, loss_fn)
 
-    # TODO: Implementar rotina de armazenar de: gráfico de loss, métricas no conjunto de teste e modelo treinado. 
+    # TODO: Implementar rotina de armazenar de: gráfico de loss, métricas no conjunto de teste e modelo treinado.
 
     # Plotagem do gráfico de perda
-    category = "bin" if num_labels == 2 else "multi"
+    # category = "bin" if num_labels == 2 else "multi"
+    category = "bin"
 
     plot_filename = f"{neural_network_type}_{category}_{str(learning_rate)}_{position}_{scenario}.png"
 
-    plot_loss_curve(train_loss, valid_loss,
-                    neural_network_results_dir, plot_filename)
+    status = save_loss_curve(train_loss, valid_loss,
+                             neural_network_results_dir, plot_filename)
+    if status:
+        print(
+            f"Gráfico de Perda gerado com sucesso.\t(Verifique o diretório {neural_network_results_dir})")
 
-    print(
-        f"Gráfico de Perda gerado com sucesso.\t(Verifique o diretório {neural_network_results_dir})")
+    test_report = get_class_report(model)
 
-    model.eval()
-
-    # Listas para armazenar todos os rótulos verdadeiros e predições
-    all_labels = []
-    all_predictions = []
-
-    # Desativa o cálculo de gradiente para economizar memória e tempo
-    with torch.no_grad():
-        for inputs, labels in test_dl:  # `train_loader` é o DataLoader do dataset de treino
-            outputs = model(inputs.float())
-
-            # Aplica a função sigmoide para transformar os logits em probabilidades
-            probabilities = torch.sigmoid(outputs.squeeze())
-
-            # Define um limiar para converter probabilidades em predições binárias
-            # 1 se >= 0.5, caso contrário 0
-            predicted = (probabilities >= 0.5).int()
-
-            # Armazena as predições e os rótulos verdadeiros
-            all_predictions.extend(predicted.numpy())
-            all_labels.extend(labels.numpy())
-
-    # Calcula e exibe o relatório de classificação
-    report = classification_report(all_labels, all_predictions)
     print("Relatório de classificação no dataset de treino:")
-    print(report)
+    print(test_report)
