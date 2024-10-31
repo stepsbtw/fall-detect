@@ -89,16 +89,19 @@ def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Ada
 
     return model, avg_train_losses, avg_valid_losses
 
+
 def save_model(model, filepath):
     torch.save(model, filepath)
 
+
 def show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test):
     info = ""
+
     def format_distribution(y_data: torch.Tensor):
         negative_class = torch.sum(y_data == 0).item()
         positive_class = torch.sum(y_data == 1).item()
         all_elements = len(y_data)
-        return  f"({int(positive_class * 100 / all_elements)}-{int(negative_class * 100 / all_elements)})%"
+        return f"({int(positive_class * 100 / all_elements)}-{int(negative_class * 100 / all_elements)})%"
 
     info += "-" * 90 + "\n"
     info += "Datasets | Labels\n"
@@ -109,17 +112,12 @@ def show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test):
     return info
     pass
 
+
 if __name__ == "__main__":
 
     debug = True
-
+    timestamp = str(int(time.time()))
     current_directory = os.path.dirname(__file__)
-
-    # Nº de Epochs
-    epochs = 10
-
-    # Função de Custo - BCELoss()??
-    loss_fn = nn.BCEWithLogitsLoss()
 
     position, label_type, scenario, neural_network_type, n_conv_layers, num_dense_layers = parse_input()
 
@@ -134,13 +132,13 @@ if __name__ == "__main__":
 
     input_shape, num_labels, X_train, y_train, X_val, y_val, X_test, y_test, = collect_datasets_from_input(
         position, label_type, scenario, label_dir, data_dir)
+    
     print(show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test))
 
     # TODO: Aqui poderia ser feito um porcesso de sintetização de dados de queda
 
     # Formação dos batches a partir dos datasets
-    train_dl, val_dl, test_dl = generate_batches(
-        X_train, y_train, X_val, y_val, X_test, y_test)
+    train_dl, val_dl, test_dl = generate_batches(X_train, y_train, X_val, y_val, X_test, y_test)
 
     # Definição da Rede Neural
     model = None
@@ -166,26 +164,31 @@ if __name__ == "__main__":
     print(model)
     print("-" * 90)
 
+    # Nº de Epochs
+    epochs = 10
+    # Função de Custo
+    loss_fn = nn.BCEWithLogitsLoss()
+
     # Treinamento própriamente dito
-    model, train_loss, valid_loss = fit(epochs, learning_rate, model,
-                                        train_dl, val_dl, loss_fn)
+    model, train_loss, valid_loss = fit(
+        epochs, learning_rate, model, train_dl, val_dl, loss_fn)
     print("-" * 90)
-    
+
     # TODO: Implementar rotina de armazenar de: gráfico de loss, métricas no conjunto de teste e modelo treinado.
 
     # Plotagem do gráfico de perda
-    # category = "bin" if num_labels == 2 else "multi"
-    category = "bin"
-    timestamp = str(int(time.time()))
-    
+    category = "bin" if num_labels == 2 else "multi"
+
     filename = f"{timestamp}_{neural_network_type}_{category}_{str(learning_rate)}_{position}_{scenario}"
 
-    save_loss_curve(train_loss, valid_loss, neural_network_results_dir, f"{filename}.png")
-    
-    print(f"Gráfico de Perda gerado com sucesso.(Verifique o diretório {neural_network_results_dir})")
+    save_loss_curve(train_loss, valid_loss,
+                    neural_network_results_dir, f"{filename}.png")
+
+    print(
+        f"Gráfico de Perda gerado com sucesso.(Verifique o diretório {neural_network_results_dir})")
 
     test_report = get_class_report(model, test_dl)
     print("Relatório de classificação no dataset de treino:")
     print(test_report)
-    
+
     save_model(model, os.path.join("models", f"{filename}.model"))
