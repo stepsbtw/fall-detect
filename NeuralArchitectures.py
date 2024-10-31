@@ -69,7 +69,7 @@ class CNN1D(nn.Module):
             self.fc_layers.append(nn.ReLU())
 
         # Output Layer
-        self.output_layer = nn.Linear(dense_neurons, num_labels)
+        self.output_layer = nn.Linear(dense_neurons, 1)
 
     def get_feature_size(self, k, init_val):
         def feature_sequence(i, a0):
@@ -100,7 +100,7 @@ class CNN1D(nn.Module):
         # print()
         x = self.output_layer(x)
         # print("Output:", x.shape)
-        x = torch.softmax(x, dim=1)
+        # x = torch.softmax(x, dim=1)
         # x = torch.argmax(x, dim=1)
         # print("Argmax:", x.shape)
         return x
