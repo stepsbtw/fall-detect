@@ -11,7 +11,7 @@ from NeuralArchitectures import CustomMLP, CNN1D
 
 # Hiperparams definidos de forma arbitrária -> Impactam diretamente na potência e no tempo de treinamento
 # Taxa de Aprendizagem
-learning_rate = 0.01
+learning_rate = 0.001
 
 first_conv_layer_size = 25
 first_dense_layer_size = 6000
@@ -92,6 +92,23 @@ def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Ada
 def save_model(model, filepath):
     torch.save(model, filepath)
 
+def show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test):
+    info = ""
+    def format_distribution(y_data: torch.Tensor):
+        negative_class = torch.sum(y_data == 0).item()
+        positive_class = torch.sum(y_data == 1).item()
+        all_elements = len(y_data)
+        return  f"({int(positive_class * 100 / all_elements)}-{int(negative_class * 100 / all_elements)})%"
+
+    info += "-" * 90 + "\n"
+    info += "Datasets | Labels\n"
+    info += "-" * 90 + "\n"
+    info += f"Treinamento: {X_train.shape} | {y_train.shape} | {format_distribution(y_train)}\n"
+    info += f"Validação: {X_val.shape} | {y_val.shape} | {format_distribution(y_val)}\n"
+    info += f"Teste: {X_test.shape} | {y_test.shape} | {format_distribution(y_test)}"
+    return info
+    pass
+
 if __name__ == "__main__":
 
     debug = True
@@ -117,13 +134,7 @@ if __name__ == "__main__":
 
     input_shape, num_labels, X_train, y_train, X_val, y_val, X_test, y_test, = collect_datasets_from_input(
         position, label_type, scenario, label_dir, data_dir)
-    print("-" * 90)
-    print("Datasets | Labels")
-    print("-" * 90)
-    print(f"Treinamento: {X_train.shape} | {y_train.shape}")
-    print(f"Validação: {X_val.shape} | {y_val.shape}")
-    print(f"Teste: {X_test.shape} | {y_test.shape}")
-    
+    print(show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test))
 
     # TODO: Aqui poderia ser feito um porcesso de sintetização de dados de queda
 

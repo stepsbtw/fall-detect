@@ -44,11 +44,10 @@ def generate_datasets(data: str = None, label: str = None):
     y = torch.from_numpy(y)
 
     # 60% para treinamento
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, train_size=0.6, random_state=101)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=0.6, random_state=101, stratify=y)
+    
     # 20% + 20% para validação e teste
-    X_test, X_val, y_test, y_val = train_test_split(
-        X_test, y_test, test_size=0.4, random_state=101)
+    X_test, X_val, y_test, y_val = train_test_split(X_test, y_test, test_size=0.4, random_state=101, stratify=y_test)
 
     # É necessário "pivotar" o datset devido a forma como o pytorch interpreta as camadas dos tensores ([batch, features, passo_de tempo])
     X_train = torch.permute(X_train, (0, 2, 1))

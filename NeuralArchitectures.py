@@ -107,7 +107,7 @@ class CNN1D(nn.Module):
 
 
 class CustomMLP(nn.Module):
-    def __init__(self, input_shape, num_asc_layers=2, num_desc_layers=1, num_labels=1):
+    def __init__(self, input_shape, num_asc_layers=1, num_desc_layers=3, num_labels=1):
         super(CustomMLP, self).__init__()
         
         # Taxa de crescimento entre camadas
@@ -124,8 +124,7 @@ class CustomMLP(nn.Module):
         input_shape = input_shape[0] * input_shape[1]
 
         for i in range(num_asc_layers):
-            self.layers.append(
-                nn.Linear(in_features=input_shape, out_features=input_shape * self.asc_factor))
+            self.layers.append(nn.Linear(in_features=input_shape, out_features=input_shape * self.asc_factor))
             input_shape *= self.asc_factor
 
         for i in range(num_desc_layers):
