@@ -1,16 +1,23 @@
 # Criado por Rodrigo Parracho - https://github.com/RodrigoKasama
 
-import os
 import optuna
 import csv
+
+import os
 import torch
 import numpy as np
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
+import time
+
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.metrics import classification_report
 
 import argparse
 
 # Dados importantes
+
+BATCH_SIZE = 32
 
 # Quantidade de leituras a cada 5s -> Passo de tempo
 array_sizes = {"chest": 1020, "right": 450, "left": 450}
@@ -158,6 +165,7 @@ def collect_datasets_from_input(position, target_type, scenario, label_dir, data
 
 def save_loss_curve(train_loss: list, valid_loss: list, image_dir: str = "./", filename: str = "plot_loss_curve"):
     fig = plt.figure(figsize=(10, 8))
+    
     plt.plot(range(1, len(train_loss)+1), train_loss, label="Training Loss")
     plt.plot(range(1, len(valid_loss)+1), valid_loss, label="Validation Loss")
 
@@ -170,8 +178,59 @@ def save_loss_curve(train_loss: list, valid_loss: list, image_dir: str = "./", f
     
     path = os.path.join(image_dir, filename)
     fig.savefig(path, bbox_inches="tight")
-    
-    return True
+    pass
+
+
+def get_class_report(model, test_dl):
+    model.eval()
+    # Listas para armazenar todos os rótulos verdadeiros e predições
+    all_labels = []
+    all_predictions = []
+
+    # Para economizar memória e tempo
+    with torch.no_grad():
+        for inputs, labels in test_dl:
+            # A saida é uma logit, então tem que aplicar sigmoide
+            outputs = model(inputs.float())
+
+            # Conversão em probabilidades
+            probabilities = torch.sigmoid(outputs.squeeze())
+
+            # Limiar para converter probabilidades em predições binárias - se >= 0.5: 1. Do contrário, 0
+            predicted = (probabilities >= 0.5).int()
+
+            # Armazena as predições e os rótulos verdadeiros
+            all_predictions.extend(predicted.numpy())
+            all_labels.extend(labels.numpy())
+
+    # Calcula e exibe o relatório de classificação
+    report = classification_report(all_labels, all_predictions)
+    return report
+
+
+def generate_batches(X_train, y_train, X_val, y_val, X_test, y_test):
+    train_ds = TensorDataset(X_train, y_train)
+    val_ds = TensorDataset(X_val, y_val)
+    test_ds = TensorDataset(X_test, y_test)
+
+    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False)
+    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
+    test_dl = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
+
+    return train_dl, val_dl, test_dl
+
+
+def create_result_dir(current_directory, model_type, pos):
+    output_dir = os.path.join(current_directory, "output")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    nn_results_dir = os.path.join(output_dir, model_type, pos)
+    if not os.path.exists(nn_results_dir):
+        os.makedirs(nn_results_dir)
+
+    return nn_results_dir
+
 
 # Funções não utilizadas voltadas p otimização de hiperparametros
 
@@ -278,3 +337,7 @@ def cnn1d_architecture(input_shape, X_train, y_train, X_val, y_val, filter_size,
     model = fit(model, X_train, y_train, X_val, y_val,
                 learning_rate, nn.CrossEntropyLoss, training_epochs)
     return model
+
+
+if __name__ == "__main__":
+    print("Este é um arquivo auxiliar e não deve ser executado dessa forma! Verifique a documentação.")
