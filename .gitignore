@@ -3,6 +3,8 @@ database/
 models/*.model
 labels_and_data/
 IPqM-Fall.zip
+output/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

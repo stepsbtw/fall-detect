@@ -10,11 +10,6 @@ from NeuralArchitectures import CustomMLP, CNN1D
 
 
 # Hiperparams definidos de forma arbitrária -> Impactam diretamente na potência e no tempo de treinamento
-# Taxa de Aprendizagem
-learning_rate = 0.001
-
-first_conv_layer_size = 25
-first_dense_layer_size = 6000
 
 
 def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Adam):
@@ -98,10 +93,14 @@ def show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test):
     info = ""
 
     def format_distribution(y_data: torch.Tensor):
+        print(f"Size: {len(y_data)}")
         negative_class = torch.sum(y_data == 0).item()
+        negative_percentage = negative_class * 100 / len(y_data)
+
         positive_class = torch.sum(y_data == 1).item()
-        all_elements = len(y_data)
-        return f"({int(positive_class * 100 / all_elements)}-{int(negative_class * 100 / all_elements)})%"
+        positive_percentage = positive_class * 100 / len(y_data)
+
+        return f"{positive_class}({int(positive_percentage)}%)-{negative_class}({int(negative_percentage)}%)"
 
     info += "-" * 90 + "\n"
     info += "Datasets | Labels\n"
@@ -132,19 +131,26 @@ if __name__ == "__main__":
 
     input_shape, num_labels, X_train, y_train, X_val, y_val, X_test, y_test, = collect_datasets_from_input(
         position, label_type, scenario, label_dir, data_dir)
-    
+
     print(show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test))
 
     # TODO: Aqui poderia ser feito um porcesso de sintetização de dados de queda
 
     # Formação dos batches a partir dos datasets
-    train_dl, val_dl, test_dl = generate_batches(X_train, y_train, X_val, y_val, X_test, y_test)
+    train_dl, val_dl, test_dl = generate_batches(
+        X_train, y_train, X_val, y_val, X_test, y_test)
 
     # Definição da Rede Neural
     model = None
+    # Taxa de Aprendizagem
+    learning_rate = 1e-3
+
     if neural_network_type == "MLP":
         model = CustomMLP(input_shape)
     else:
+
+        first_conv_layer_size = 25
+        first_dense_layer_size = 6000
         model = CNN1D(
             # Comprimento das janela
             input_shape=input_shape,

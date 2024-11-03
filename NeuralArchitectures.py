@@ -110,13 +110,16 @@ class CustomMLP(nn.Module):
     def __init__(self, input_shape, num_asc_layers=1, num_desc_layers=3, num_labels=1):
         super(CustomMLP, self).__init__()
         
+        if num_labels > 1:
+            raise NotImplemented("Essa feature ainda não foi desenvolvida de forma estável")
+        
         # Taxa de crescimento entre camadas
         self.asc_factor = 2
         # Taxa de decrescimento entre camadas
         self.desc_factor = 3
         
         self.layers = nn.ModuleList()
-
+        self.dropout_factor = 0.6
         # Recebe como entrada input_shape tuple(N_observ, N_vari)
         # Caso Multivariado (N_vari > 1) - Add um flatten
         if input_shape[1] > 1: self.layers.append(nn.Flatten())
@@ -126,18 +129,23 @@ class CustomMLP(nn.Module):
         for i in range(num_asc_layers):
             self.layers.append(nn.Linear(in_features=input_shape, out_features=input_shape * self.asc_factor))
             input_shape *= self.asc_factor
+            self.layers.append(nn.ReLU()) 
+            self.layers.append(nn.Dropout(self.dropout_factor))
 
         for i in range(num_desc_layers):
             self.layers.append(nn.Linear(in_features=input_shape, out_features=input_shape // self.desc_factor))
             input_shape //= self.desc_factor
-
+            self.layers.append(nn.ReLU()) 
+            self.layers.append(nn.Dropout(self.dropout_factor))
+            
+        self.layers.pop(-1)
             # Classificação binária -> Saida em um único neurônio
         self.output_layer = nn.Linear(in_features=input_shape, out_features=num_labels)
 
     def forward(self, x):
 
         for i, layer in enumerate(self.layers):
-            x = nn.functional.relu(layer(x))
+            x = layer(x)
         x = self.output_layer(x)
 
         return x
