@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import time
 
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, confusion_matrix
 
 import argparse
 
@@ -208,7 +208,8 @@ def get_class_report(model, test_dl):
 
     # Calcula e exibe o relatório de classificação
     report = classification_report(all_labels, all_predictions)
-    return report
+    conf_matrix = confusion_matrix(all_labels, all_predictions)
+    return report, conf_matrix
 
 
 def generate_batches(X_train, y_train, X_val, y_val, X_test, y_test):

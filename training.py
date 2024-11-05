@@ -192,8 +192,9 @@ if __name__ == "__main__":
     print(
         f"Gráfico de Perda gerado com sucesso.(Verifique o diretório {neural_network_results_dir})")
 
-    test_report = get_class_report(model, test_dl)
+    test_report, matri_conf = get_class_report(model, test_dl)
     print("Relatório de classificação no dataset de treino:")
     print(test_report)
+    print(matri_conf)
 
     save_model(model, os.path.join("models", f"{filename}.model"))
