@@ -44,10 +44,12 @@ def generate_datasets(data: str = None, label: str = None):
     y = torch.from_numpy(y)
 
     # 60% para treinamento
-    X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=0.6, random_state=101, stratify=y)
-    
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, train_size=0.6, random_state=101, stratify=y)
+
     # 20% + 20% para validação e teste
-    X_test, X_val, y_test, y_val = train_test_split(X_test, y_test, test_size=0.4, random_state=101, stratify=y_test)
+    X_test, X_val, y_test, y_val = train_test_split(
+        X_test, y_test, test_size=0.4, random_state=101, stratify=y_test)
 
     # É necessário "pivotar" o datset devido a forma como o pytorch interpreta as camadas dos tensores ([batch, features, passo_de tempo])
     X_train = torch.permute(X_train, (0, 2, 1))
@@ -111,7 +113,7 @@ def parse_input():
     )
     parser.add_argument("-e", "--epochs", type=check_positive, default=20,
                         help="Numero épocas de treinamento rede neural")
-    parser.add_argument("-c", "--n_conv", type=check_positive, default=1,
+    parser.add_argument("-c", "--n_conv", type=check_positive, default=2,
                         help="Numero de sequencias de Convolução1D, ReLU, MaxPool1D e Dropout na rede neural")
     parser.add_argument("-d", "--n_dense", type=check_positive,
                         default=1, help="Numero de Camadas Densas na rede neural")
@@ -166,7 +168,7 @@ def collect_datasets_from_input(position, target_type, scenario, label_dir, data
 
 def save_loss_curve(train_loss: list, valid_loss: list, image_dir: str = "./", filename: str = "plot_loss_curve"):
     fig = plt.figure(figsize=(10, 8))
-    
+
     plt.plot(range(1, len(train_loss)+1), train_loss, label="Training Loss")
     plt.plot(range(1, len(valid_loss)+1), valid_loss, label="Validation Loss")
 
@@ -176,7 +178,7 @@ def save_loss_curve(train_loss: list, valid_loss: list, image_dir: str = "./", f
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    
+
     path = os.path.join(image_dir, filename)
     fig.savefig(path, bbox_inches="tight")
     pass

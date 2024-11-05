@@ -93,7 +93,6 @@ def show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test):
     info = ""
 
     def format_distribution(y_data: torch.Tensor):
-        print(f"Size: {len(y_data)}")
         negative_class = torch.sum(y_data == 0).item()
         negative_percentage = negative_class * 100 / len(y_data)
 
@@ -117,7 +116,10 @@ if __name__ == "__main__":
     debug = True
     timestamp = str(int(time.time()))
     current_directory = os.path.dirname(__file__)
-
+    
+    # Taxa de Aprendizagem
+    learning_rate = 1e-3
+    
     position, label_type, scenario, neural_network_type, n_conv_layers, num_dense_layers, epochs  = parse_input()
 
     neural_network_results_dir = create_result_dir(
@@ -142,8 +144,6 @@ if __name__ == "__main__":
 
     # Definição da Rede Neural
     model = None
-    # Taxa de Aprendizagem
-    learning_rate = 1e-3
 
     if neural_network_type == "MLP":
         model = CustomMLP(input_shape)
