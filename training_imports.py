@@ -92,23 +92,25 @@ def parse_input():
         type=str,
         choices=["left", "chest", "right"],
         required=True,
-        help="Referente a qual sensor será utilzado.",
+        help="Referente a qual sensor será utilizado.",
     )
     parser.add_argument(
         "-l", "--label_type",
         type=str,
         choices=["binary_one", "binary_two"],
         # choices=["multiple_one", "multiple_two","binary_one", "binary_two"],
-        required=True,
+        default="binary_one",
         help="Type of classification problem Multi/Binary Classes",
     )
     parser.add_argument(
         "-nn", "--neural_network_type",
         type=str,
         choices=["CNN1D", "MLP"],
-        default="CNN1D",
-        help="Tipo de rede neural (CNN1D) **MLP abandonada**",
+        required=True,
+        help="Tipo de rede neural CNN1D ou MLP"
     )
+    parser.add_argument("-e", "--epochs", type=check_positive, default=20,
+                        help="Numero épocas de treinamento rede neural")
     parser.add_argument("-c", "--n_conv", type=check_positive, default=1,
                         help="Numero de sequencias de Convolução1D, ReLU, MaxPool1D e Dropout na rede neural")
     parser.add_argument("-d", "--n_dense", type=check_positive,
@@ -116,7 +118,7 @@ def parse_input():
 
     args = parser.parse_args()
 
-    return args.position, args.label_type, args.scenario, args.neural_network_type, args.n_conv, args.n_dense
+    return args.position, args.label_type, args.scenario, args.neural_network_type, args.n_conv, args.n_dense, args.epochs
 
 
 def collect_datasets_from_input(position, target_type, scenario, label_dir, data_dir):

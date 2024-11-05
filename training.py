@@ -118,7 +118,7 @@ if __name__ == "__main__":
     timestamp = str(int(time.time()))
     current_directory = os.path.dirname(__file__)
 
-    position, label_type, scenario, neural_network_type, n_conv_layers, num_dense_layers = parse_input()
+    position, label_type, scenario, neural_network_type, n_conv_layers, num_dense_layers, epochs  = parse_input()
 
     neural_network_results_dir = create_result_dir(
         current_directory, neural_network_type, position)
@@ -171,7 +171,6 @@ if __name__ == "__main__":
     print("-" * 90)
 
     # Nº de Epochs
-    epochs = 10
     # Função de Custo
     loss_fn = nn.BCEWithLogitsLoss()
 
