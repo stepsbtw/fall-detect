@@ -120,10 +120,7 @@ if __name__ == "__main__":
     timestamp = str(int(time.time()))
     current_directory = os.path.dirname(__file__)
     
-    # Taxa de Aprendizagem
-    learning_rate = 1e-3
-    
-    position, label_type, scenario, neural_network_type, n_conv_layers, num_dense_layers, epochs  = parse_input()
+    position, label_type, scenario, neural_network_type, n_conv_layers, num_dense_layers, epochs, learning_rate  = parse_input()
 
     neural_network_results_dir = create_result_dir(
         current_directory, neural_network_type, position)
@@ -187,7 +184,8 @@ if __name__ == "__main__":
     category = "bin" if num_labels == 2 else "multi"
 
     filename = f"{timestamp}_{neural_network_type}_{category}_{str(learning_rate)}_{position}_{scenario}"
-
+    
+	# 
     save_loss_curve(train_loss, valid_loss,
                     neural_network_results_dir, f"{filename}.png")
 
@@ -196,7 +194,8 @@ if __name__ == "__main__":
     test_report, dict_test_report, matri_conf = get_class_report(model, test_dl)
     print("Relatório de classificação no dataset de treino:")
     print(test_report)
+    
     export_result(scenario, neural_network_type, position, dict_test_report)
+    save_model(model, os.path.join("models", f"{filename}.model"))
     # print(matri_conf)
 
-    save_model(model, os.path.join("models", f"{filename}.model"))

@@ -68,58 +68,57 @@ def check_positive(value):
 
 def parse_input():
     parser = argparse.ArgumentParser(description="Script for model training")
-    
+
     # Argumentos obrigatórios
     parser.add_argument("-s", "--scenario",
-        type=str,
-        choices=[
-            # Cenários sem transformada de fourier
-            # Univariada
-            "Sc1_acc_T", "Sc1_gyr_T",
-            # Multivariada (x, y, z)
-            "Sc_2_acc_T", "Sc_2_gyr_T",
-            # Multivariada - Aceleração Linear e Angular (2)
-            "Sc_3_T",
-            # Multivariada - (x, y, z)-Linear e (x, y, z)-Angular (6)
-            "Sc_4_T",
+                        type=str,
+                        choices=[
+                            # Cenários sem transformada de fourier
+                            # Univariada
+                            "Sc1_acc_T", "Sc1_gyr_T",
+                            # Multivariada (x, y, z)
+                            "Sc_2_acc_T", "Sc_2_gyr_T",
+                            # Multivariada - Aceleração Linear e Angular (2)
+                            "Sc_3_T",
+                            # Multivariada - (x, y, z)-Linear e (x, y, z)-Angular (6)
+                            "Sc_4_T",
 
-            # Cenários com transformada de fourier
-            "Sc1_acc_F", "Sc1_gyr_F", "Sc_2_acc_F", "Sc_2_gyr_F", "Sc_3_F", "Sc_4_F"
-        ],
-        required=True,
-        help="Possiveis Cenários a se trabalhar.Cenários com *_F referem-se a transformada de fourier entrada, enquanto que *_T são leituras sem transformação.\n Cenários com *_acc_* referem-se a leitura de aceleração LINEAR, enquanto que Cenários com *_gyr_* referem-se à leitura de aceleração ANGULAR.",
-    )
+                            # Cenários com transformada de fourier
+                            "Sc1_acc_F", "Sc1_gyr_F", "Sc_2_acc_F", "Sc_2_gyr_F", "Sc_3_F", "Sc_4_F"
+                        ],
+                        required=True,
+                        help="Possiveis Cenários a se trabalhar.Cenários com *_F referem-se a transformada de fourier entrada, enquanto que *_T são leituras sem transformação.\n Cenários com *_acc_* referem-se a leitura de aceleração LINEAR, enquanto que Cenários com *_gyr_* referem-se à leitura de aceleração ANGULAR.",
+                        )
     parser.add_argument("-p", "--position",
-        type=str,
-        choices=["left", "chest", "right"],
-        required=True,
-        help="Referente a qual sensor será utilizado.",
-    )
+                        type=str,
+                        choices=["left", "chest", "right"],
+                        required=True,
+                        help="Referente a qual sensor será utilizado.",
+                        )
     parser.add_argument("-nn", "--neural_network_type",
-        type=str,
-        choices=["CNN1D", "MLP"],
-        required=True,
-        help="Tipo de rede neural CNN1D ou MLP"
-    )
-    
+                        type=str,
+                        choices=["CNN1D", "MLP"],
+                        required=True,
+                        help="Tipo de rede neural CNN1D ou MLP"
+                        )
+
     # Argumentos opcionais
+    parser.add_argument("-lr", "--learning_rate", type=float, default=0.001,
+                        help="Taxa de aprendizado da rede neural. Default: 0.001")
     parser.add_argument("-e", "--epochs", type=check_positive, default=20,
-                        help="Numero épocas de treinamento rede neural")
+                        help="Numero épocas de treinamento rede neural. Defalut: 20")
     parser.add_argument("-c", "--n_conv", type=check_positive, default=2,
-                        help="Numero de sequencias de Convolução1D, ReLU, MaxPool1D e Dropout na rede neural")
+                        help="Numero de sequencias de Convolução1D + ReLU + MaxPool1D + Dropout na rede neural. Default: 2")
     parser.add_argument("-d", "--n_dense", type=check_positive, default=1,
-                        help="Numero de Camadas Densas na rede neural")
-    parser.add_argument("-l", "--label_type",
-        type=str,
-        choices=["binary_one", "binary_two"],
-        # choices=["multiple_one", "multiple_two","binary_one", "binary_two"],
-        default="binary_one",
-        help="Type of classification problem Multi/Binary Classes",
-    )
-    
+                        help="Numero de camadas ocultas na rede neural. Default: 1")
+    parser.add_argument("-l", "--label_type", type=str, default="binary_one",
+                        choices=["binary_one", "binary_two"],
+                        help="Tipo de classificação binária. Default: 'binary_one'",
+                        )
+
     args = parser.parse_args()
 
-    return args.position, args.label_type, args.scenario, args.neural_network_type, args.n_conv, args.n_dense, args.epochs
+    return args.position, args.label_type, args.scenario, args.neural_network_type, args.n_conv, args.n_dense, args.epochs, args.learning_rate
 
 
 def collect_datasets_from_input(position, target_type, scenario, label_dir, data_dir):
@@ -206,8 +205,10 @@ def get_class_report(model, test_dl):
             all_labels.extend(labels.numpy())
 
     # Calcula e exibe o relatório de classificação
-    report = classification_report(all_labels, all_predictions, zero_division=0)
-    dict_report = classification_report(all_labels, all_predictions, zero_division=0, output_dict=True)
+    report = classification_report(
+        all_labels, all_predictions, zero_division=0)
+    dict_report = classification_report(
+        all_labels, all_predictions, zero_division=0, output_dict=True)
     conf_matrix = confusion_matrix(all_labels, all_predictions)
     return report, dict_report, conf_matrix
 
