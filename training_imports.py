@@ -8,7 +8,6 @@ import torch
 import numpy as np
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
-import time
 
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import classification_report, confusion_matrix
@@ -17,7 +16,7 @@ import argparse
 
 # Dados importantes
 
-BATCH_SIZE = 32
+BATCH_SIZE = 64  # 128
 
 # Quantidade de leituras a cada 5s -> Passo de tempo
 array_sizes = {"chest": 1020, "right": 450, "left": 450}
@@ -69,8 +68,9 @@ def check_positive(value):
 
 def parse_input():
     parser = argparse.ArgumentParser(description="Script for model training")
-    parser.add_argument(
-        "-s", "--scenario",
+    
+    # Argumentos obrigatórios
+    parser.add_argument("-s", "--scenario",
         type=str,
         choices=[
             # Cenários sem transformada de fourier
@@ -89,35 +89,34 @@ def parse_input():
         required=True,
         help="Possiveis Cenários a se trabalhar.Cenários com *_F referem-se a transformada de fourier entrada, enquanto que *_T são leituras sem transformação.\n Cenários com *_acc_* referem-se a leitura de aceleração LINEAR, enquanto que Cenários com *_gyr_* referem-se à leitura de aceleração ANGULAR.",
     )
-    parser.add_argument(
-        "-p", "--position",
+    parser.add_argument("-p", "--position",
         type=str,
         choices=["left", "chest", "right"],
         required=True,
         help="Referente a qual sensor será utilizado.",
     )
-    parser.add_argument(
-        "-l", "--label_type",
+    parser.add_argument("-nn", "--neural_network_type",
+        type=str,
+        choices=["CNN1D", "MLP"],
+        required=True,
+        help="Tipo de rede neural CNN1D ou MLP"
+    )
+    
+    # Argumentos opcionais
+    parser.add_argument("-e", "--epochs", type=check_positive, default=20,
+                        help="Numero épocas de treinamento rede neural")
+    parser.add_argument("-c", "--n_conv", type=check_positive, default=2,
+                        help="Numero de sequencias de Convolução1D, ReLU, MaxPool1D e Dropout na rede neural")
+    parser.add_argument("-d", "--n_dense", type=check_positive, default=1,
+                        help="Numero de Camadas Densas na rede neural")
+    parser.add_argument("-l", "--label_type",
         type=str,
         choices=["binary_one", "binary_two"],
         # choices=["multiple_one", "multiple_two","binary_one", "binary_two"],
         default="binary_one",
         help="Type of classification problem Multi/Binary Classes",
     )
-    parser.add_argument(
-        "-nn", "--neural_network_type",
-        type=str,
-        choices=["CNN1D", "MLP"],
-        required=True,
-        help="Tipo de rede neural CNN1D ou MLP"
-    )
-    parser.add_argument("-e", "--epochs", type=check_positive, default=20,
-                        help="Numero épocas de treinamento rede neural")
-    parser.add_argument("-c", "--n_conv", type=check_positive, default=2,
-                        help="Numero de sequencias de Convolução1D, ReLU, MaxPool1D e Dropout na rede neural")
-    parser.add_argument("-d", "--n_dense", type=check_positive,
-                        default=1, help="Numero de Camadas Densas na rede neural")
-
+    
     args = parser.parse_args()
 
     return args.position, args.label_type, args.scenario, args.neural_network_type, args.n_conv, args.n_dense, args.epochs
@@ -207,9 +206,10 @@ def get_class_report(model, test_dl):
             all_labels.extend(labels.numpy())
 
     # Calcula e exibe o relatório de classificação
-    report = classification_report(all_labels, all_predictions)
+    report = classification_report(all_labels, all_predictions, zero_division=0)
+    dict_report = classification_report(all_labels, all_predictions, zero_division=0, output_dict=True)
     conf_matrix = confusion_matrix(all_labels, all_predictions)
-    return report, conf_matrix
+    return report, dict_report, conf_matrix
 
 
 def generate_batches(X_train, y_train, X_val, y_val, X_test, y_test):

@@ -7,10 +7,7 @@ import numpy as np
 import time
 from training_imports import *
 from NeuralArchitectures import CustomMLP, CNN1D
-
-
-# Hiperparams definidos de forma arbitrária -> Impactam diretamente na potência e no tempo de treinamento
-
+import json
 
 def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Adam):
 
@@ -110,7 +107,13 @@ def show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test):
     return info
     pass
 
-
+def export_result(scenario, neural_network_type, position, test_report):
+    filename = f"results/{scenario}_{neural_network_type}_{position}.json"
+    with open(filename, "w") as f:
+        json.dump(test_report, f, indent=4)
+    print(f"{filename} salvo.")
+    
+    
 if __name__ == "__main__":
 
     debug = True
@@ -133,10 +136,10 @@ if __name__ == "__main__":
 
     input_shape, num_labels, X_train, y_train, X_val, y_val, X_test, y_test, = collect_datasets_from_input(
         position, label_type, scenario, label_dir, data_dir)
-
+    
     print(show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test))
 
-    # TODO: Aqui poderia ser feito um porcesso de sintetização de dados de queda
+    # TODO: Aqui poderia ser feito um porcesso de sintetização de dados de queda, caso necessário.
 
     # Formação dos batches a partir dos datasets
     train_dl, val_dl, test_dl = generate_batches(
@@ -175,8 +178,7 @@ if __name__ == "__main__":
     loss_fn = nn.BCEWithLogitsLoss()
 
     # Treinamento própriamente dito
-    model, train_loss, valid_loss = fit(
-        epochs, learning_rate, model, train_dl, val_dl, loss_fn)
+    model, train_loss, valid_loss = fit(epochs, learning_rate, model, train_dl, val_dl, loss_fn)
     print("-" * 90)
 
     # TODO: Implementar rotina de armazenar de: gráfico de loss, métricas no conjunto de teste e modelo treinado.
@@ -189,12 +191,12 @@ if __name__ == "__main__":
     save_loss_curve(train_loss, valid_loss,
                     neural_network_results_dir, f"{filename}.png")
 
-    print(
-        f"Gráfico de Perda gerado com sucesso.(Verifique o diretório {neural_network_results_dir})")
-
-    test_report, matri_conf = get_class_report(model, test_dl)
+    print(f"Gráfico de Perda gerado com sucesso.(Verifique o diretório {neural_network_results_dir})")
+    print("-" * 90)
+    test_report, dict_test_report, matri_conf = get_class_report(model, test_dl)
     print("Relatório de classificação no dataset de treino:")
     print(test_report)
-    print(matri_conf)
+    export_result(scenario, neural_network_type, position, dict_test_report)
+    # print(matri_conf)
 
     save_model(model, os.path.join("models", f"{filename}.model"))
