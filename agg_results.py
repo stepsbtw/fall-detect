@@ -25,15 +25,15 @@ def define_key_subkey(filename):
 for i, filename in enumerate(sorted(os.listdir("results"))):
     if filename.endswith(".json"):
         with open(f"results/{filename}", "r") as file:
-            
+
             key, subkey = define_key_subkey(filename[:-5])
             # Temos que aplicar essa lógica para não sobrescrever agg_results[key][subkey]
-            if agg_results.get(key) is None: 
+            if agg_results.get(key) is None:
                 agg_results[key] = {}
-            
+
             agg_results[key].update({subkey: json.load(file)})
 
 with open("dump.json", "w") as f:
     json.dump(agg_results, f, indent=4)
 
-print(f"{i} elementos agrupados em dump.json")
+print(f"{i+1} elementos agrupados em dump.json")
