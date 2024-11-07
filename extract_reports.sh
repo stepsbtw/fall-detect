@@ -10,8 +10,7 @@ for cenario in "${cenarios[@]}"; do
     for nn in "${redenerural[@]}"; do
         for sensor in "${sensores[@]}"; do
 		if [ ! -e "./results/${cenario}_${nn}_${sensor}.json" ]; then
-
-			# echo "${cenario}_${nn}_${sensor}.json não existe"
+			echo "Criando ${cenario}_${nn}_${sensor}.json..."
 			python3 training.py -s "$cenario" -p "$sensor" -nn "$nn"
 		fi
         done
