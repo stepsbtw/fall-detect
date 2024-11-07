@@ -115,10 +115,13 @@ def parse_input():
                         choices=["binary_one", "binary_two"],
                         help="Tipo de classificação binária. Default: 'binary_one'",
                         )
+    parser.add_argument("--export", action="store_true",
+                        help="Marcador para exportar o gráfico de aprendizado, o relatório de classificação e o modelo. Default: FALSE",
+                        )
 
     args = parser.parse_args()
 
-    return args.position, args.label_type, args.scenario, args.neural_network_type, args.n_conv, args.n_dense, args.epochs, args.learning_rate
+    return args.position, args.label_type, args.scenario, args.neural_network_type, args.n_conv, args.n_dense, args.epochs, args.learning_rate, args.export
 
 
 def collect_datasets_from_input(position, target_type, scenario, label_dir, data_dir):

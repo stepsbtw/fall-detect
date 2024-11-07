@@ -112,15 +112,15 @@ def export_result(scenario, neural_network_type, position, test_report):
     with open(filename, "w") as f:
         json.dump(test_report, f, indent=4)
     print(f"{filename} salvo.")
-    
-    
+
+
 if __name__ == "__main__":
 
-    debug = True
+    export = False
     timestamp = str(int(time.time()))
     current_directory = os.path.dirname(__file__)
-    
-    position, label_type, scenario, neural_network_type, n_conv_layers, num_dense_layers, epochs, learning_rate  = parse_input()
+
+    position, label_type, scenario, neural_network_type, n_conv_layers, num_dense_layers, epochs, learning_rate, export  = parse_input()
 
     neural_network_results_dir = create_result_dir(
         current_directory, neural_network_type, position)
@@ -133,7 +133,7 @@ if __name__ == "__main__":
 
     input_shape, num_labels, X_train, y_train, X_val, y_val, X_test, y_test, = collect_datasets_from_input(
         position, label_type, scenario, label_dir, data_dir)
-    
+
     print(show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test))
 
     # TODO: Aqui poderia ser feito um porcesso de sintetização de dados de queda, caso necessário.
@@ -184,18 +184,18 @@ if __name__ == "__main__":
     category = "bin" if num_labels == 2 else "multi"
 
     filename = f"{timestamp}_{neural_network_type}_{category}_{str(learning_rate)}_{position}_{scenario}"
-    
-	# 
-    save_loss_curve(train_loss, valid_loss,
-                    neural_network_results_dir, f"{filename}.png")
 
-    print(f"Gráfico de Perda gerado com sucesso.(Verifique o diretório {neural_network_results_dir})")
-    print("-" * 90)
+    if export:
+        save_loss_curve(train_loss, valid_loss, neural_network_results_dir, f"{filename}.png")
+        print(f"Gráfico de Perda gerado com sucesso.(Verifique o diretório {neural_network_results_dir})")
+        print("-" * 90)
+
     test_report, dict_test_report, matri_conf = get_class_report(model, test_dl)
     print("Relatório de classificação no dataset de treino:")
     print(test_report)
-    
-    export_result(scenario, neural_network_type, position, dict_test_report)
-    save_model(model, os.path.join("models", f"{filename}.model"))
+
+    if export:
+        export_result(scenario, neural_network_type, position, dict_test_report)
+        save_model(model, os.path.join("models", f"{filename}.model"))
     # print(matri_conf)
 
