@@ -2,6 +2,8 @@ import os
 import json
 
 agg_results = {}
+agg_filename = "agg_results.json"
+
 
 def define_key_subkey(filename):
     key = ""
@@ -33,7 +35,7 @@ for i, filename in enumerate(sorted(os.listdir("results"))):
 
             agg_results[key].update({subkey: json.load(file)})
 
-with open("dump.json", "w") as f:
+with open(agg_filename, "w") as f:
     json.dump(agg_results, f, indent=4)
 
-print(f"{i+1} elementos agrupados em dump.json")
+print(f"{i+1} elementos agrupados em {agg_filename}")

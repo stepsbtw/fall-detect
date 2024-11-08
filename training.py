@@ -111,7 +111,7 @@ def export_result(scenario, neural_network_type, position, test_report):
     filename = f"results/{scenario}_{neural_network_type}_{position}.json"
     with open(filename, "w") as f:
         json.dump(test_report, f, indent=4)
-    print(f"{filename} salvo.")
+
 
 
 if __name__ == "__main__":
@@ -195,7 +195,10 @@ if __name__ == "__main__":
     print(test_report)
 
     if export:
+        print("-" * 90)
         export_result(scenario, neural_network_type, position, dict_test_report)
+        print("Resultados exportado com sucesso.")
         save_model(model, os.path.join("models", f"{filename}.model"))
+        print("Modelo salvo com sucesso.")
     # print(matri_conf)
 
