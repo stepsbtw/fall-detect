@@ -4,8 +4,10 @@
 Com o objetivo de isolar o projeto, é recomendado a criação de um ambiente virtual do python:
 
 ```
-python3 -m venv nome-do-enviroment
+python -m venv nome-do-enviroment
 ```
+
+obs: Se possível, utilize o Python 3.10 para nenhum erro de compatibilidade entre bibliotecas do projeto.
 
 ## Importação dos dados
 
@@ -22,15 +24,15 @@ Após instalação dos pacotes necessários, importaremos a base de dados a ser 
 
 Uma vez com os pacotes necessários instalados e a base de dados baixada e **descompactada**. Será realizado a criação do dataset através dos comandos:
 ```
-python3 training_data_generator.py chest
-python3 training_data_generator.py right
-python3 training_data_generator.py left
+python training_data_generator.py chest
+python training_data_generator.py right
+python training_data_generator.py left
 ```
 
 ```
-python3 generate_datasets.py chest
-python3 generate_datasets.py right
-python3 generate_datasets.py left
+python generate_datasets.py chest
+python generate_datasets.py right
+python generate_datasets.py left
 ```
 
 Uma vez com o dataset de cada modalidade (chest, right e left) criado é possivel seguir para a etapa de treinamento da Rede Neural.
@@ -42,12 +44,12 @@ Para o treinamento, execute o script `training.py` com os parâmetros que deseja
 ------------------------------------------------------------------------------------------
 Exemplos: 
 
-python3 training.py -s Sc1_acc_T -p chest -l binary_one -nn CNN1D -c 2 -d 3
-python3 training.py -s Sc_2_acc_F -p chest -nn CNN1D --n_conv 2 --n_dense 3 --epochs 10
+python training.py -s Sc1_acc_T -p chest -l binary_one -nn CNN1D -c 2 -d 3
+python training.py -s Sc_2_acc_F -p chest -nn CNN1D --n_conv 2 --n_dense 3 --epochs 10
 ------------------------------------------------------------------------------------------
 
 
-> python3 training.py -s Sc_2_gyr_T -p chest -nn MLP --epochs 50
+> python training.py -s Sc_2_gyr_T -p chest -nn MLP --epochs 50
 
 ------------------------------------------------------------------------------------------
 Datasets | Labels
