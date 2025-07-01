@@ -27,6 +27,12 @@ python3 training_data_generator.py right
 python3 training_data_generator.py left
 ```
 
+```
+python3 generate_datasets.py chest
+python3 generate_datasets.py right
+python3 generate_datasets.py left
+```
+
 Uma vez com o dataset de cada modalidade (chest, right e left) criado é possivel seguir para a etapa de treinamento da Rede Neural.
 
 ## Treinamento e Plotagem 
@@ -78,6 +84,12 @@ weighted avg       0.97      0.96      0.96      1449
 
 Após o treinamento será gerado um grafico, no diretório indicado, para análise do desempenho da rede neural ao longo do treinamento e será aplicado o `classification_report` com o dataset de teste.
 ---
+
+## Automatização do Treinamento
+Utilize o script extract_reports.sh no bash.
+ou
+Utilize o run_all.py
+
 
 #### Observações
 Alguns arquivos presentes no repositório servem apenas como comparação com o projeto original (`run_of_the_neural_network_model.py` ou `model_builders/`) ou auxilio (`commands.txt`).
