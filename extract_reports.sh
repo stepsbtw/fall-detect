@@ -11,7 +11,7 @@ for cenario in "${cenarios[@]}"; do
         for sensor in "${sensores[@]}"; do
 		if [ ! -e "./results/${cenario}_${nn}_${sensor}.json" ]; then
 			echo "Criando ${cenario}_${nn}_${sensor}.json..."
-			python3 training.py -s "$cenario" -p "$sensor" -nn "$nn" --export
+			python training.py -s "$cenario" -p "$sensor" -nn "$nn" --export
 		fi
         done
     done
@@ -19,4 +19,4 @@ done
 
 
 # Agrupando resultados
-python3 agg_results.py
+python agg_results.py
