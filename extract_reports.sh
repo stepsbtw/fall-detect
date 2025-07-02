@@ -20,3 +20,20 @@ done
 
 # Agrupando resultados
 python agg_results.py
+
+# Verificando se houve alterações
+if [[ `git status --porcelain output/ results/ models/` ]]; then
+    echo "Mudanças detectadas. Commitando e enviando..."
+    
+    git add output/ results/ models/
+    
+    COMMIT_MSG="Resultado dos testes automatizados commit - $(date '+%Y-%m-%d %H:%M:%S')"
+    git commit -m "$COMMIT_MSG"
+
+    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    git push origin "$CURRENT_BRANCH"
+
+    echo "Alterações commitadas e enviadas com sucesso."
+else
+    echo "Nenhuma alteração detectada nas pastas output/, results/ ou models/. Nada foi commitado."
+fi

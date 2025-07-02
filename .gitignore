@@ -1,16 +1,16 @@
 __pycache__/
 database/
-models/*.model
+#models/*.model
 labels_and_data/
 IPqM-Fall.zip
 
-output/MLP/chest/*.png
-output/MLP/right/*.png
-output/MLP/left/*.png
+#output/MLP/chest/*.png
+#output/MLP/right/*.png
+#output/MLP/left/*.png
 
-output/CNN1D/chest/*.png
-output/CNN1D/right/*.png
-output/CNN1D/left/*.png
+#output/CNN1D/chest/*.png
+#output/CNN1D/right/*.png
+#output/CNN1D/left/*.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
