@@ -1,4 +1,5 @@
 # Criado por Rodrigo Parracho - https://github.com/RodrigoKasama
+# Adaptado por Caio Passos - https://github.com/stepsbtw
 
 #import optuna
 import csv
@@ -194,6 +195,7 @@ def get_class_report(model, test_dl):
     # Para economizar memória e tempo
     with torch.no_grad():
         for inputs, labels in test_dl:
+            inputs, labels = inputs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
             # A saida é uma logit, então tem que aplicar sigmoide
             outputs = model(inputs.float())
 
@@ -221,9 +223,9 @@ def generate_batches(X_train, y_train, X_val, y_val, X_test, y_test):
     val_ds = TensorDataset(X_val, y_val)
     test_ds = TensorDataset(X_test, y_test)
 
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False)
-    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
-    test_dl = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
+    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+    test_dl = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
     return train_dl, val_dl, test_dl
 
@@ -241,3 +243,13 @@ def create_result_dir(current_directory, model_type, pos):
 
 
 # Funções não utilizadas voltadas p otimização de hiperparametros
+
+
+# Dispositivo para rodar (GPU se disponível)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Usando dispositivo: {device}")
+
+# Configuração do benchmark para CUDNN, se estiver usando GPU
+# Isso pode melhorar o desempenho para redes neurais com entradas de tamanho fixo
+if device.type == "cuda":
+    torch.backends.cudnn.benchmark = True
