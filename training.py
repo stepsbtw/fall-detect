@@ -11,10 +11,6 @@ import json
 
 def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Adam):
 
-    # to track the training loss as the model trains
-    train_losses = []
-    # to track the validation loss as the model trains
-    valid_losses = []
     # to track the average training loss per epoch as the model trains
     avg_train_losses = []
     # to track the average validation loss per epoch as the model trains
@@ -23,6 +19,10 @@ def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Ada
     optimizer = opt_func(model.parameters(), lr)
 
     for epoch in range(epochs):
+# to track the training loss as the model trains
+        train_losses = []
+    # to track the validation loss as the model trains
+        valid_losses = []
 
         ###################
         # train the model #
@@ -112,9 +112,16 @@ def export_result(scenario, neural_network_type, position, test_report):
     with open(filename, "w") as f:
         json.dump(test_report, f, indent=4)
 
-
+def set_seed(seed=42):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 if __name__ == "__main__":
+    set_seed(42)
 
     export = False
     timestamp = str(int(time.time()))
