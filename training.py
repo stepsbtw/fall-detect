@@ -10,13 +10,18 @@ from training_imports import *
 from NeuralArchitectures import CustomMLP, CNN1D
 import json
 
-def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Adam):
+def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Adam,
+        patience=5, checkpoint_path=None):
     train_losses = []
     valid_losses = []
     avg_train_losses = []
     avg_valid_losses = []
 
     optimizer = opt_func(model.parameters(), lr)
+
+    best_val_loss = float('inf')
+    epochs_no_improve = 0
+    best_model_state = None  # Para armazenar em memória se não quiser salvar no disco
 
     for epoch in range(epochs):
         model.train()
@@ -48,8 +53,31 @@ def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Ada
 
         avg_train_losses.append(train_loss)
         avg_valid_losses.append(valid_loss)
+
+        # Early stopping logic
+        if valid_loss < best_val_loss:
+            best_val_loss = valid_loss
+            epochs_no_improve = 0
+
+            # Save model
+            if checkpoint_path:
+                torch.save(model.state_dict(), checkpoint_path)
+            else:
+                best_model_state = model.state_dict()
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                print(f"Early stopping at epoch {epoch+1}")
+                break
+
         train_losses = []
         valid_losses = []
+
+    # Load best model (optional, but recommended)
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        model.load_state_dict(torch.load(checkpoint_path))
+    elif best_model_state:
+        model.load_state_dict(best_model_state)
 
     return model, avg_train_losses, avg_valid_losses
 
