@@ -1,9 +1,8 @@
 # Criado por Rodrigo Parracho - https://github.com/RodrigoKasama
 # Adaptado por Caio Passos - https://github.com/stepsbtw
 
-#import optuna
 import csv
-
+import json
 import os
 import torch
 import numpy as np
@@ -14,6 +13,10 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import classification_report, confusion_matrix
 
 import argparse
+import seaborn as sns
+from sklearn.metrics import roc_auc_score, roc_curve
+
+from neural_architectures import CustomMLP, CNN1D, CustomLSTM
 
 # Dados importantes
 
@@ -102,6 +105,18 @@ def parse_input():
                         required=True,
                         help="Tipo de rede neural CNN1D ou MLP"
                         )
+    # Parâmetros específicos do LSTM
+    parser.add_argument("--hidden_size", type=int, default=128,
+                        help="Tamanho do hidden state na LSTM. Default: 128")
+    parser.add_argument("--num_lstm_layers", type=int, default=2,
+                        help="Número de camadas LSTM. Default: 2")
+    parser.add_argument("--num_dense_layers_lstm", type=int, default=2,
+                        help="Número de camadas densas após a LSTM. Default: 2")
+    parser.add_argument("--first_dense_size_lstm", type=int, default=128,
+                        help="Tamanho inicial da primeira camada densa do LSTM. Default: 128")
+    parser.add_argument("--bidirectional", type=bool, default=True,
+                        help="Se a LSTM será bidirecional. Default: True")
+
 
     # Argumentos opcionais
     parser.add_argument("-lr", "--learning_rate", type=float, default=0.001,
@@ -122,7 +137,7 @@ def parse_input():
 
     args = parser.parse_args()
 
-    return args.position, args.label_type, args.scenario, args.neural_network_type, args.n_conv, args.n_dense, args.epochs, args.learning_rate, args.export
+    return args
 
 
 def collect_datasets_from_input(position, target_type, scenario, label_dir, data_dir):
@@ -185,37 +200,73 @@ def save_loss_curve(train_loss: list, valid_loss: list, image_dir: str = "./", f
     fig.savefig(path, bbox_inches="tight")
     pass
 
-
 def get_class_report(model, test_dl):
     model.eval()
-    # Listas para armazenar todos os rótulos verdadeiros e predições
     all_labels = []
     all_predictions = []
+    all_probs = []
 
-    # Para economizar memória e tempo
     with torch.no_grad():
         for inputs, labels in test_dl:
-            inputs, labels = inputs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-            # A saida é uma logit, então tem que aplicar sigmoide
+            inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs.float())
+            probs = torch.sigmoid(outputs.squeeze())
 
-            # Conversão em probabilidades
-            probabilities = torch.sigmoid(outputs.squeeze())
+            preds = (probs >= 0.5).int()
 
-            # Limiar para converter probabilidades em predições binárias - se >= 0.5: 1. Do contrário, 0
-            predicted = (probabilities >= 0.5).int()
+            all_probs.extend(probs.cpu().numpy())
+            all_predictions.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
 
-            # Armazena as predições e os rótulos verdadeiros
-            all_predictions.extend(predicted.numpy())
-            all_labels.extend(labels.numpy())
-
-    # Calcula e exibe o relatório de classificação
-    report = classification_report(
-        all_labels, all_predictions, zero_division=0)
-    dict_report = classification_report(
-        all_labels, all_predictions, zero_division=0, output_dict=True)
+    report = classification_report(all_labels, all_predictions, zero_division=0)
+    dict_report = classification_report(all_labels, all_predictions, zero_division=0, output_dict=True)
     conf_matrix = confusion_matrix(all_labels, all_predictions)
-    return report, dict_report, conf_matrix
+
+    try:
+        auc = roc_auc_score(all_labels, all_probs)
+    except:
+        auc = None
+
+    return report, dict_report, conf_matrix, all_labels, all_probs, auc
+
+
+
+def plot_confusion_matrix(cm, path, labels=None):
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    if cm is None:
+        print("Aviso: matriz de confusão está vazia (None).")
+        return
+
+    plt.figure(figsize=(5, 4))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=labels if labels is not None else range(cm.shape[0]),
+                yticklabels=labels if labels is not None else range(cm.shape[0]))
+    plt.xlabel("Predito")
+    plt.ylabel("Real")
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+def get_mlp_feature_importance(model: CustomMLP, input_shape: tuple, output_path: str):
+    if input_shape[1] > 1:
+        num_features = input_shape[0] * input_shape[1]
+    else:
+        num_features = input_shape[0]
+    weights = model.layers[0].weight.detach().cpu().numpy().mean(axis=0)
+
+    plt.figure(figsize=(12, 6))
+    plt.bar(range(num_features), weights)
+    plt.title("Feature Importance (First Layer Weights)")
+    plt.xlabel("Feature Index")
+    plt.ylabel("Mean Weight")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
 
 
 def generate_batches(X_train, y_train, X_val, y_val, X_test, y_test):
@@ -223,9 +274,9 @@ def generate_batches(X_train, y_train, X_val, y_val, X_test, y_test):
     val_ds = TensorDataset(X_val, y_val)
     test_ds = TensorDataset(X_test, y_test)
 
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
-    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
-    test_dl = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+    test_dl = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
 
     return train_dl, val_dl, test_dl
 
@@ -241,13 +292,44 @@ def create_result_dir(current_directory, model_type, pos):
 
     return nn_results_dir
 
+def export_result(scenario, neural_network_type, position, test_report):
+    filename = f"results/{scenario}_{neural_network_type}_{position}.json"
+    with open(filename, "w") as f:
+        json.dump(test_report, f, indent=4)
 
-# Funções não utilizadas voltadas p otimização de hiperparametros
+def set_seed(seed=42):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+def show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test):
+    def class_dist(y):
+        y = y.numpy()
+        return {int(k): int(v) for k, v in zip(*np.unique(y, return_counts=True))}
+
+    info = {
+        "X_train": list(X_train.shape),
+        "y_train_dist": class_dist(y_train),
+        "X_val": list(X_val.shape),
+        "y_val_dist": class_dist(y_val),
+        "X_test": list(X_test.shape),
+        "y_test_dist": class_dist(y_test),
+    }
+
+    msg = "\n--- Dataset Info ---\n"
+    msg += f"Train Set: {info['X_train']}, Class Dist: {info['y_train_dist']}\n"
+    msg += f"Val Set:   {info['X_val']}, Class Dist: {info['y_val_dist']}\n"
+    msg += f"Test Set:  {info['X_test']}, Class Dist: {info['y_test_dist']}\n"
+    msg += "-" * 24
+    return msg
+
 
 
 # Dispositivo para rodar (GPU se disponível)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Usando dispositivo: {device}")
 
 # Configuração do benchmark para CUDNN, se estiver usando GPU
 # Isso pode melhorar o desempenho para redes neurais com entradas de tamanho fixo

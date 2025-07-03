@@ -1,10 +1,9 @@
 numpy
 matplotlib
 scikit-learn
+seaborn
 optuna
 pandas
 
 --index-url https://download.pytorch.org/whl/cu118
 torch
-torchvision
-torchaudio

@@ -1,156 +1,56 @@
-# Criado por Rodrigo Parracho - https://github.com/RodrigoKasama
-# Adaptado por Caio Passos - https://github.com/stepsbtw
-
+# training.py
 import os
+import time
 import torch
 import torch.nn as nn
-import numpy as np
-import time
-from training_imports import *
-from NeuralArchitectures import CustomMLP, CNN1D
-import json
 
-def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Adam,
-        patience=5, checkpoint_path=None):
-    train_losses = []
-    valid_losses = []
-    avg_train_losses = []
-    avg_valid_losses = []
+from training_imports import show_datasets_info
 
-    optimizer = opt_func(model.parameters(), lr)
+from data_utils import (
+    parse_input,
+    collect_datasets_from_input,
+    generate_batches,
+    create_result_dir,
+    set_seed
+)
 
-    best_val_loss = float('inf')
-    epochs_no_improve = 0
-    best_model_state = None  # Para armazenar em memória se não quiser salvar no disco
+from metrics_utils import get_class_report
 
-    for epoch in range(epochs):
-        model.train()
-        for data, target in train_dl:
-            data, target = data.to(device, non_blocking=True), target.to(device, non_blocking=True)
+from visual_utils import (
+    save_loss_curve,
+    plot_confusion_matrix,
+    get_mlp_feature_importance,
+    export_result
+)
 
-            optimizer.zero_grad()
-            output = model(data.float())
-            loss = criterion(output.squeeze(), target.float())
-            loss.backward()
-            optimizer.step()
-            train_losses.append(loss.item())
+from training_utils import (
+    fit,
+    build_model,
+    save_model
+)
+from training_utils import fit, build_model, save_model
 
-        model.eval()
-        with torch.no_grad():
-            for data, target in val_dl:
-                data, target = data.to(device, non_blocking=True), target.to(device, non_blocking=True)
-                output = model(data.float())
-                loss = criterion(output.squeeze(), target.float())
-                valid_losses.append(loss.item())
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        train_loss = np.average(train_losses)
-        valid_loss = np.average(valid_losses)
-        epoch_len = len(str(epochs))
-
-        print(f"[{epoch+1:>{epoch_len}}/{epochs:>{epoch_len}}] " +
-              f"train_loss: {train_loss:.4f} " +
-              f"valid_loss: {valid_loss:.4f}")
-
-        avg_train_losses.append(train_loss)
-        avg_valid_losses.append(valid_loss)
-
-        # Early stopping logic
-        if valid_loss < best_val_loss:
-            best_val_loss = valid_loss
-            epochs_no_improve = 0
-
-            # Save model
-            if checkpoint_path:
-                torch.save(model.state_dict(), checkpoint_path)
-            else:
-                best_model_state = model.state_dict()
-        else:
-            epochs_no_improve += 1
-            if epochs_no_improve >= patience:
-                print(f"Early stopping at epoch {epoch+1}")
-                break
-
-        train_losses = []
-        valid_losses = []
-
-    # Load best model (optional, but recommended)
-    if checkpoint_path and os.path.exists(checkpoint_path):
-        model.load_state_dict(torch.load(checkpoint_path))
-    elif best_model_state:
-        model.load_state_dict(best_model_state)
-
-    return model, avg_train_losses, avg_valid_losses
-
-
-def save_model(model, filepath):
-    torch.save(model, filepath)
-
-
-def show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test):
-    info = ""
-
-    def format_distribution(y_data: torch.Tensor):
-        negative_class = torch.sum(y_data == 0).item()
-        negative_percentage = negative_class * 100 / len(y_data)
-        positive_class = torch.sum(y_data == 1).item()
-        positive_percentage = positive_class * 100 / len(y_data)
-        return f"{positive_class}({int(positive_percentage)}%)-{negative_class}({int(negative_percentage)}%)"
-
-    info += "-" * 90 + "\n"
-    info += "Datasets | Labels\n"
-    info += "-" * 90 + "\n"
-    info += f"Treinamento: {X_train.shape} | {y_train.shape} | {format_distribution(y_train)}\n"
-    info += f"Validação: {X_val.shape} | {y_val.shape} | {format_distribution(y_val)}\n"
-    info += f"Teste: {X_test.shape} | {y_test.shape} | {format_distribution(y_test)}"
-    return info
-
-
-def export_result(scenario, neural_network_type, position, test_report):
-    filename = f"results/{scenario}_{neural_network_type}_{position}.json"
-    with open(filename, "w") as f:
-        json.dump(test_report, f, indent=4)
-
-
-if __name__ == "__main__":
-    export = False
+def main():
+    set_seed(42)
+    args = parse_input()
     timestamp = str(int(time.time()))
     current_directory = os.path.dirname(__file__)
 
-    position, label_type, scenario, neural_network_type, n_conv_layers, num_dense_layers, epochs, learning_rate, export = parse_input()
-
-    neural_network_results_dir = create_result_dir(
-        current_directory, neural_network_type, position)
-
-    data_dir = os.path.join(current_directory, "labels_and_data", "data", position)
-    label_dir = os.path.join(current_directory, "labels_and_data", "labels", position)
+    results_dir = create_result_dir(current_directory, args.neural_network_type, args.position)
+    data_dir = os.path.join(current_directory, "labels_and_data", "data", args.position)
+    label_dir = os.path.join(current_directory, "labels_and_data", "labels", args.position)
 
     input_shape, num_labels, X_train, y_train, X_val, y_val, X_test, y_test = collect_datasets_from_input(
-        position, label_type, scenario, label_dir, data_dir)
+        args.position, args.label_type, args.scenario, label_dir, data_dir
+    )
 
     print(show_datasets_info(X_train, y_train, X_val, y_val, X_test, y_test))
+    train_dl, val_dl, test_dl = generate_batches(X_train, y_train, X_val, y_val, X_test, y_test)
 
-    train_dl, val_dl, test_dl = generate_batches(
-        X_train, y_train, X_val, y_val, X_test, y_test)
+    model = build_model(args, input_shape, num_labels)
 
-    model = None
-    if neural_network_type == "MLP":
-        model = CustomMLP(input_shape)
-    else:
-        first_conv_layer_size = 25
-        first_dense_layer_size = 6000
-        model = CNN1D(
-            input_shape=input_shape,
-            n_conv_layers=n_conv_layers,
-            first_conv_layer_size=first_conv_layer_size,
-            num_dense_layers=num_dense_layers,
-            first_dense_layer_size=first_dense_layer_size,
-            num_labels=num_labels
-        )
-
-    if model is None:
-        raise Exception("Por algum motivo o modelo não pode ser construido")
-
-    # Suporte a múltiplas GPUs
     if torch.cuda.device_count() > 1:
         print(f"Usando {torch.cuda.device_count()} GPUs.")
         model = nn.DataParallel(model)
@@ -161,25 +61,49 @@ if __name__ == "__main__":
     print(model)
     print("-" * 90)
 
-    loss_fn = nn.BCEWithLogitsLoss()
-    model, train_loss, valid_loss = fit(epochs, learning_rate, model, train_dl, val_dl, loss_fn)
-    print("-" * 90)
+    # Peso para classe positiva (para BCEWithLogitsLoss)
+    n_pos = torch.sum(y_train == 1).item()
+    n_neg = torch.sum(y_train == 0).item()
+    if n_pos == 0:
+        print("Erro: Nenhuma amostra da classe positiva no conjunto de treino.")
+        return
 
-    category = "bin" if num_labels == 2 else "multi"
-    filename = f"{timestamp}_{neural_network_type}_{category}_{str(learning_rate)}_{position}_{scenario}"
+    pos_weight = torch.tensor([n_neg / n_pos], device=device)
+    print(f"pos_weight usado: {pos_weight.item():.2f}")
 
-    if export:
-        save_loss_curve(train_loss, valid_loss, neural_network_results_dir, f"{filename}.png")
-        print(f"Gráfico de Perda gerado com sucesso.(Verifique o diretório {neural_network_results_dir})")
-        print("-" * 90)
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-    test_report, dict_test_report, matri_conf = get_class_report(model, test_dl)
-    print("Relatório de classificação no dataset de treino:")
-    print(test_report)
+    filename = f"{timestamp}_{args.neural_network_type}_{'bin' if num_labels == 2 else 'multi'}_{args.learning_rate}_{args.position}_{args.scenario}"
+    checkpoint_path = os.path.join(results_dir, f"{filename}.ckpt")
 
-    if export:
-        print("-" * 90)
-        export_result(scenario, neural_network_type, position, dict_test_report)
-        print("Resultados exportado com sucesso.")
+    model, train_loss, valid_loss = fit(
+        args.epochs, args.learning_rate, model, train_dl, val_dl,
+        loss_fn, checkpoint_path=checkpoint_path
+    )
+
+    if args.export:
+        save_loss_curve(train_loss, valid_loss, results_dir, f"{filename}.png")
+        print(f"Gráfico de Perda salvo em: {results_dir}")
+
+    report, dict_report, conf_matrix, _, _, auc = get_class_report(model, test_dl, expected_classes=(0, 1))
+    print("Relatório de classificação no dataset de teste:")
+    print(report)
+
+    if args.export:
+        export_result(args.scenario, args.neural_network_type, args.position, dict_report)
         save_model(model, os.path.join("models", f"{filename}.model"))
-        print("Modelo salvo com sucesso.")
+        print("Relatório e modelo exportados com sucesso.")
+
+        if conf_matrix is not None:
+            plot_confusion_matrix(conf_matrix, os.path.join(results_dir, f"{filename}_confusion_matrix.png"))
+
+        if "MLP" in args.neural_network_type.upper():
+            get_mlp_feature_importance(model, input_shape, os.path.join(results_dir, f"{filename}_feature_importance.png"))
+
+        if auc:
+            with open(os.path.join(results_dir, f"{filename}_auc.txt"), "w") as f:
+                f.write(f"AUC-ROC: {auc:.4f}\n")
+
+
+if __name__ == "__main__":
+    main()
