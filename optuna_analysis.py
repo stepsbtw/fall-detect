@@ -7,6 +7,35 @@ import os
 import csv
 import json
 
+def analyze_optuna_study(scenario, position, metric="value"):
+    study_name = f"{scenario}_{position}"
+    save_dir = os.path.join("optuna_results", study_name)
+    storage_path = f"sqlite:///{os.path.join(save_dir, 'optuna_study.db')}"
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage_path)
+    except Exception as e:
+        print(f"[!] Failed to load study '{study_name}': {e}")
+        return pd.DataFrame()
+
+    trials_df = study.trials_dataframe(attrs=("number", "value", "params", "state"))
+    trials_df = trials_df[trials_df["state"] == "COMPLETE"]
+
+    params_df = pd.json_normalize(trials_df["params"])
+    result_df = pd.concat([trials_df[["number", "value"]], params_df], axis=1)
+    result_df = result_df.sort_values(by=metric, ascending=False)
+
+    # Save results
+    result_df.to_csv(os.path.join(save_dir, f"{study_name}_results.csv"), index=False)
+    with open(os.path.join(save_dir, f"{study_name}_best_params.json"), "w") as f:
+        json.dump(study.best_trial.params, f, indent=4)
+
+    print(f"[✓] Results saved to: {save_dir}")
+    print(f"[✓] Best trial ({metric}): {study.best_trial.value:.4f}")
+    return result_df
+
 def analyze_logged_trials(log_csv="optuna_logs/optuna_trials.csv", save_dir="optuna_results", metric="score"):
     os.makedirs(save_dir, exist_ok=True)
 

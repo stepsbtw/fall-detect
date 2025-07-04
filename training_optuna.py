@@ -7,10 +7,11 @@ from utils_data import prepare_datasets
 from utils_training import set_seed, build_model_optuna, fit
 from utils_output import export_optuna_results, save_report, best_model_optuna
 
-from optuna_analysis import analyze_logged_trials, log_optuna_trial
+from optuna_analysis import analyze_logged_trials, log_optuna_trial, analyze_optuna_study
 import gc
 
 from sklearn.metrics import f1_score
+import json
 
 
 positions = ["left", "right", "chest"]
@@ -22,10 +23,11 @@ scenarios = [
 label_type = "binary_one"
 
 def run_optuna_for_combination(position, scenario):
-    label_dir = f"./labels_and_data/labels/{position}"
-    data_dir = f"./labels_and_data/data/{position}"
-    save_dir = os.path.join("optuna_results", f"{scenario}_{position}")
+    study_name = f"{scenario}_{position}"
+    save_dir = os.path.join("optuna_results", study_name)
+    log_dir = os.path.join("optuna_logs", study_name)
     os.makedirs(save_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
 
     # Shared state
     best_model = None
@@ -34,12 +36,15 @@ def run_optuna_for_combination(position, scenario):
     best_model_filename = None
     best_train_loss = None
     best_valid_loss = None
-    
+
     def objective(trial):
         nonlocal best_model, best_f1, best_test_report, best_model_filename, best_train_loss, best_valid_loss
 
         input_shape, num_labels, train_dl, val_dl, test_dl = prepare_datasets(
-            position, label_type, scenario, label_dir, data_dir)
+            position, label_type, scenario,
+            label_dir=f"./labels_and_data/labels/{position}",
+            data_dir=f"./labels_and_data/data/{position}"
+        )
 
         model_type = trial.suggest_categorical("model_type", ["MLP", "CNN1D", "LSTM"])
         model = build_model_optuna(model_type, trial, input_shape, num_labels)
@@ -60,7 +65,6 @@ def run_optuna_for_combination(position, scenario):
         )
 
         eval_model = model.module if isinstance(model, torch.nn.DataParallel) else model
-
         report, dict_report, conf_matrix, all_labels, all_probs, all_predictions, auc = save_report(eval_model, val_dl)
         f1 = f1_score(all_labels, all_predictions, pos_label=1)
 
@@ -75,18 +79,27 @@ def run_optuna_for_combination(position, scenario):
                 model, model_type, trial, f1, input_shape, test_dl, save_dir
             )
 
-        log_optuna_trial(trial, f1, save_dir="optuna_logs")
+        log_optuna_trial(trial, f1, save_dir=log_dir)
         torch.cuda.empty_cache()
         gc.collect()
         return f1
 
+    print(f"\n Running Optuna for: scenario={scenario}, position={position}")
 
-    print(f"\nRunning Optuna for: scenario={scenario}, position={position}")
     pruner = SuccessiveHalvingPruner(min_resource=1, reduction_factor=3)
-    study = optuna.create_study(direction="maximize", pruner=pruner)
-    #study.optimize(objective, n_trials=20, n_jobs=4)
+    storage_path = f"sqlite:///{os.path.join(save_dir, 'optuna_study.db')}"
+
+    study = optuna.create_study(
+        study_name=study_name,
+        direction="maximize",
+        pruner=pruner,
+        storage=storage_path,
+        load_if_exists=True
+    )
+
     study.optimize(objective, n_trials=20)
 
+    # Plotting
     for plot_func, filename in [
         (plot_intermediate_values, "intermediate_values.html"),
         (plot_param_importances, "param_importances.html"),
@@ -96,16 +109,26 @@ def run_optuna_for_combination(position, scenario):
             fig = plot_func(study)
             fig.write_html(os.path.join(save_dir, filename))
         except Exception as e:
-            print(f"Failed to generate {filename}: {e}")
+            print(f"[!] Failed to generate {filename}: {e}")
 
     print("Best hyperparameters:")
     print(study.best_trial.params)
 
+    # Save model
     if best_model:
-        torch.save(best_model, os.path.join(save_dir, best_model_filename))
-        print(f"Best model saved: {best_model_filename}")
+        model_path = os.path.join(save_dir, best_model_filename)
+        torch.save(best_model, model_path)
+        print(f"[✓] Best model saved to: {model_path}")
+
+    # Save best params and score
+    with open(os.path.join(save_dir, "best_params.json"), "w") as f:
+        json.dump(study.best_trial.params, f, indent=4)
+
+    with open(os.path.join(save_dir, "best_score.txt"), "w") as f:
+        f.write(f"{study.best_value:.4f}")
 
     export_optuna_results(study, save_dir, best_model_filename, best_test_report, best_train_loss, best_valid_loss)
+
 
 
 if __name__ == "__main__":
@@ -113,15 +136,22 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
-    
+
     set_seed(42)
-        
-    # Rodando optuna somente para a combinação ótima do artigo. Vou comparar dominio do tempo e frequencia.
+
+    # Run Optuna for the best-case scenarios (time vs frequency domain)
     run_optuna_for_combination("chest", "Sc_4_T")
     run_optuna_for_combination("chest", "Sc_4_F")
 
-    df = analyze_logged_trials(study_name="caio_optuna", metric="value")
+    # Analyze the logged trials (from log_optuna_trial)
+    df = analyze_logged_trials(
+        log_csv="optuna_logs/optuna_trials.csv",
+        save_dir="optuna_results",
+        metric="score"
+    )
 
+    # Analyze the saved study database
+    df2 = analyze_optuna_study("Sc_4_T", "chest")
 
     '''
     for position in positions:
