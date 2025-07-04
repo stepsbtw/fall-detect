@@ -13,6 +13,8 @@ output/CNN1D/chest/*.png
 output/CNN1D/right/*.png
 output/CNN1D/left/*.png
 
+optuna_results/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
