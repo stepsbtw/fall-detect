@@ -1,14 +1,14 @@
 import optuna
-import torch
 import os
-from training import *
+import torch
 from optuna.pruners import SuccessiveHalvingPruner
 from optuna.visualization import plot_intermediate_values, plot_param_importances, plot_slice
+from utils_data import prepare_datasets
+from utils_training import set_seed, build_model_optuna, fit
+from utils_output import export_optuna_results, save_report, best_model_optuna
 
-from model_utils import build_model_from_trial, prepare_datasets
-from optuna_utils import handle_best_model, export_optuna_results
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from optuna_analysis import analyze_optuna_study, log_optuna_trial
+import gc
 
 positions = ["left", "right", "chest"]
 scenarios = [
@@ -31,18 +31,19 @@ def run_optuna_for_combination(position, scenario):
     best_model_filename = None
     best_train_loss = None
     best_valid_loss = None
-
+    
     def objective(trial):
         nonlocal best_model, best_f1, best_test_report, best_model_filename, best_train_loss, best_valid_loss
 
         input_shape, num_labels, train_dl, val_dl, test_dl = prepare_datasets(
             position, label_type, scenario, label_dir, data_dir)
 
-        model, model_type = build_model_from_trial(trial, input_shape, num_labels)
+        model_type = trial.suggest_categorical("model_type", ["MLP", "CNN1D", "LSTM"])
+        model = build_model_optuna(model_type, trial, input_shape, num_labels)
 
         if torch.cuda.device_count() > 1:
             model = torch.nn.DataParallel(model)
-        model = model.to(device)
+        model = model.to(device, non_blocking=True)
 
         y_train = train_dl.dataset.tensors[1]
         pos_weight = torch.tensor([(y_train == 0).sum() / (y_train == 1).sum()], device=device)
@@ -55,24 +56,31 @@ def run_optuna_for_combination(position, scenario):
             criterion=loss_fn, patience=3, trial=trial
         )
 
-        _, dict_report, cm, _, _, auc = get_class_report(model, val_dl)
+        report, dict_report, conf_matrix, all_labels, all_probs, auc = save_report(model, val_dl)
         f1 = dict_report.get("1", {}).get("f1-score", 0.0)
+
+        print(f"[Trial {trial.number}] F1: {f1:.4f}, model_type={model_type}, lr={lr}")
 
         if f1 > best_f1:
             best_f1 = f1
             best_model = model
             best_train_loss = train_loss
             best_valid_loss = valid_loss
-            best_model_filename, best_test_report = handle_best_model(
+            best_model_filename, best_test_report = best_model_optuna(
                 model, model_type, trial, f1, input_shape, test_dl, save_dir
             )
 
+        log_optuna_trial(trial, f1, save_dir="optuna_logs")
+        torch.cuda.empty_cache()
+        gc.collect()
         return f1
+
 
     print(f"\nRunning Optuna for: scenario={scenario}, position={position}")
     pruner = SuccessiveHalvingPruner(min_resource=1, reduction_factor=3)
     study = optuna.create_study(direction="maximize", pruner=pruner)
-    study.optimize(objective, n_trials=30)
+    #study.optimize(objective, n_trials=20, n_jobs=4)
+    study.optimize(objective, n_trials=20)
 
     for plot_func, filename in [
         (plot_intermediate_values, "intermediate_values.html"),
@@ -96,9 +104,26 @@ def run_optuna_for_combination(position, scenario):
 
 
 if __name__ == "__main__":
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+    
+    set_seed(42)
+        
+    # Rodando optuna somente para a combinação ótima do artigo. Vou comparar dominio do tempo e frequencia.
+    run_optuna_for_combination("chest", "Sc_4_T")
+    run_optuna_for_combination("chest", "Sc_4_F")
+
+    df = analyze_optuna_study(study_name="caio_optuna", metric="value")
+
+
+    '''
     for position in positions:
         for scenario in scenarios:
             try:
                 run_optuna_for_combination(position, scenario)
             except Exception as e:
                 print(f"Error in scenario={scenario}, position={position}: {e}")
+    '''
+    
