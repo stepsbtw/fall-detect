@@ -125,4 +125,13 @@ for topic, font in {"time": data_arrays_time_domain, "frequency": data_arrays_fr
     )
     np.save(os.path.join(data_array_directory, f"acc_and_gyr_three_axes_{topic}_domain_data_array.npy"), accgyr)
 
+# Save corresponding labels
+    label_input_path = os.path.join(current_directory, "labels_and_data", "labels", "chest", "binary_class_label_1.npy")
+    label_output_path = os.path.join(current_directory, "labels_and_data", "labels", "combined_labels.npy")
+
+    labels = np.load(label_input_path)
+    np.save(label_output_path, labels)
+
+    print(f"  ✔ Labels salvos: combined_labels.npy — shape: {labels.shape}")
+
 print(f"\n Finalizado. Dados disponíveis em: {os.path.join(current_directory, 'labels_and_data')}")
