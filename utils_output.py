@@ -50,9 +50,7 @@ def save_report(model, test_dl, expected_classes=(0,1)):
     except:
         auc = None
 
-    # Relatórios
     try:
-        # Força entrada de todas as classes esperadas
         for cls in expected_classes:
             str_cls = str(cls)
             if str_cls not in dict_report:
@@ -62,13 +60,13 @@ def save_report(model, test_dl, expected_classes=(0,1)):
                     "f1-score": 0.0,
                     "support": 0
                 }
-
     except Exception as e:
         print(f"Erro ao gerar classification_report: {e}")
         report = "Erro ao gerar classification_report"
         dict_report = {str(cls): {"f1-score": 0.0} for cls in expected_classes}
 
-    return report, dict_report, conf_matrix, all_labels, all_probs, auc
+    return report, dict_report, conf_matrix, all_labels, all_probs, all_predictions, auc
+
 
 def export_optuna_results(study, save_dir, best_test_report, best_train_loss, best_valid_loss):
     df = study.trials_dataframe()

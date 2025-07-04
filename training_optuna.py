@@ -7,8 +7,11 @@ from utils_data import prepare_datasets
 from utils_training import set_seed, build_model_optuna, fit
 from utils_output import export_optuna_results, save_report, best_model_optuna
 
-from optuna_analysis import analyze_optuna_study, log_optuna_trial
+from optuna_analysis import analyze_logged_trials, log_optuna_trial
 import gc
+
+from sklearn.metrics import f1_score
+
 
 positions = ["left", "right", "chest"]
 scenarios = [
@@ -56,10 +59,10 @@ def run_optuna_for_combination(position, scenario):
             criterion=loss_fn, patience=3, trial=trial
         )
 
-        report, dict_report, conf_matrix, all_labels, all_probs, auc = save_report(model, val_dl)
-        f1 = dict_report.get("1", {}).get("f1-score", 0.0)
+        report, dict_report, conf_matrix, all_labels, all_probs, all_predictions, auc = save_report(eval_model, val_dl)
+        f1 = f1_score(all_labels, all_predictions, pos_label=1)
 
-        print(f"[Trial {trial.number}] F1: {f1:.4f}, model_type={model_type}, lr={lr}")
+        print(f"[Trial {trial.number}] F1: {f1:.4f}, model_type={model_type}")
 
         if f1 > best_f1:
             best_f1 = f1
@@ -115,7 +118,7 @@ if __name__ == "__main__":
     run_optuna_for_combination("chest", "Sc_4_T")
     run_optuna_for_combination("chest", "Sc_4_F")
 
-    df = analyze_optuna_study(study_name="caio_optuna", metric="value")
+    df = analyze_logged_trials(study_name="caio_optuna", metric="value")
 
 
     '''

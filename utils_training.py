@@ -9,10 +9,11 @@ from torchmetrics.classification import (
     BinaryF1Score, BinaryMatthewsCorrCoef, BinaryAccuracy, BinaryAUROC
 )
 
+from utils_output import save_loss_curve
 
 
 def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Adam,
-        patience=5, checkpoint_path=None, trial=None):
+        patience=5, checkpoint_path=None, trial=None, save_dir="optuna_results"):
 
     optimizer = opt_func(model.parameters(), lr)
     avg_train_losses = []
@@ -110,6 +111,10 @@ def fit(epochs, lr, model, train_dl, val_dl, criterion, opt_func=torch.optim.Ada
             trial.report(valid_loss, step=epoch)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
+    
+    filename = f"loss_curve_trial_{trial.number if trial else 'default'}.png"
+    os.makedirs(save_dir, exist_ok=True)
+    save_loss_curve(avg_train_losses, avg_valid_losses, image_dir=save_dir, filename=filename)
 
     # Load best model
     if checkpoint_path and os.path.exists(checkpoint_path):
