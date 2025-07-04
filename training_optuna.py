@@ -59,6 +59,8 @@ def run_optuna_for_combination(position, scenario):
             criterion=loss_fn, patience=3, trial=trial
         )
 
+        eval_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+
         report, dict_report, conf_matrix, all_labels, all_probs, all_predictions, auc = save_report(eval_model, val_dl)
         f1 = f1_score(all_labels, all_predictions, pos_label=1)
 
