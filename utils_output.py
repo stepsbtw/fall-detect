@@ -91,7 +91,7 @@ def best_model_optuna(model, model_type, trial, f1, input_shape, test_dl, save_d
     torch.save(model, model_path)
     print(f"[Trial {trial.number}] Novo melhor modelo salvo: {model_path}")
 
-    report, dict_report, conf_matrix, all_labels, all_probs, auc = save_report(model, test_dl, expected_classes=(0, 1))
+    report, dict_report, conf_matrix, all_labels, all_probs, all_predictions,  auc = save_report(model, test_dl, expected_classes=(0, 1))
 
     return model_filename, dict_report
 
