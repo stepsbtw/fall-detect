@@ -3,7 +3,11 @@ Adaptação para o PyTorch do trabalho original : https://AILAB-CEFET-RJ/falldet
 
 Baseado no artigo - A Machine Learning Approach to Automatic Fall Detection of Soldiers: https://arxiv.org/abs/2501.15655v2
 
-Além da adaptação, o modelo LSTM foi implementado e testado junto aos demais.
+Além da adaptação, o modelo LSTM foi implementado e testado junto aos demais. 
+
+Os sensores no trabalho original não são combinados (left, chest, right), por motivos de "escolher o melhor". 
+
+Podemos propor uma fusão dos dados, assim podemos aproveitar as nuances de cada sensor e obter o melhor modelo.
 
 ### Antes de tudo
 Com o objetivo de isolar o projeto, é recomendado a criação de um ambiente virtual do python:
