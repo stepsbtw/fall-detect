@@ -9,6 +9,8 @@ Os sensores no trabalho original não são combinados (left, chest, right), por 
 
 Podemos propor uma fusão dos dados, assim podemos aproveitar as nuances de cada sensor e obter o melhor modelo.
 
+Melhor ainda! Podemos fazer stacking entre os modelos treinados em cada sensor (pra poder receber input de cada um deles).
+
 ### Antes de tudo
 Com o objetivo de isolar o projeto, é recomendado a criação de um ambiente virtual do python:
 
