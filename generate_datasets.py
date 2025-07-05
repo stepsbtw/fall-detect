@@ -51,6 +51,15 @@ def generate_fused_dataset():
     X_fused = np.concatenate([X_chest, X_left_resampled, X_right_resampled], axis=2)
     np.save(os.path.join(base_path, "combined_time_domain_data.npy"), X_fused)
 
+# Save corresponding labels
+    label_input_path = os.path.join(current_directory, "labels_and_data", "labels", "chest", "binary_class_label_1.npy")
+    label_output_path = os.path.join(current_directory, "labels_and_data", "labels", "combined_labels.npy")
+
+    labels = np.load(label_input_path)
+    np.save(label_output_path, labels)
+
+    print(f"  ✔ Labels salvos: combined_labels.npy — shape: {labels.shape}")
+
     print(f"  ✔ Salvo: combined_time_domain_data.npy — shape: {X_fused.shape}")
 
 def generate_fused_frequency_dataset():
@@ -124,14 +133,5 @@ for topic, font in {"time": data_arrays_time_domain, "frequency": data_arrays_fr
         axis=2
     )
     np.save(os.path.join(data_array_directory, f"acc_and_gyr_three_axes_{topic}_domain_data_array.npy"), accgyr)
-
-# Save corresponding labels
-    label_input_path = os.path.join(current_directory, "labels_and_data", "labels", "chest", "binary_class_label_1.npy")
-    label_output_path = os.path.join(current_directory, "labels_and_data", "labels", "combined_labels.npy")
-
-    labels = np.load(label_input_path)
-    np.save(label_output_path, labels)
-
-    print(f"  ✔ Labels salvos: combined_labels.npy — shape: {labels.shape}")
 
 print(f"\n Finalizado. Dados disponíveis em: {os.path.join(current_directory, 'labels_and_data')}")
