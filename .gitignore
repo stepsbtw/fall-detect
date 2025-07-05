@@ -4,9 +4,7 @@
 /database
 /labels_and_data
 
-/optuna_results
-/optuna_logs
-/runs
+/optuna_results/*/*.model
 
 /output
 /results
