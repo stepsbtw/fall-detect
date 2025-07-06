@@ -9,3 +9,5 @@
 /output
 /results
 /models
+
+builders/__pycache__

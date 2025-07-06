@@ -1,0 +1,14 @@
+{
+    "model_type": "LSTM",
+    "hidden_size": 180,
+    "num_lstm_layers": 1,
+    "num_dense_layers": 1,
+    "first_dense_size": 321,
+    "bidirectional": true,
+    "dropout": 0.2,
+    "learning_rate": 0.01,
+    "decision_threshold": 0.6,
+    "lr": 0.0003481595152133137,
+    "trial_number": 9,
+    "score": 0.4743362831858407
+}

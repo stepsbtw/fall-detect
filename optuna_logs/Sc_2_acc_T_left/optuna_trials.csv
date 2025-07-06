@@ -1,0 +1,2 @@
+model_type,num_layers,dense_neurons,dropout,learning_rate,decision_threshold,lr,trial_number,score
+MLP,5,99,0.2,0.01,0.9,0.00016790660756855458,0,0.9583081570996979

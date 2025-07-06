@@ -1,0 +1,11 @@
+{
+    "model_type": "MLP",
+    "num_layers": 1,
+    "dense_neurons": 3928,
+    "dropout": 0.4,
+    "learning_rate": 0.001,
+    "decision_threshold": 0.5,
+    "lr": 0.008227048911383468,
+    "trial_number": 57,
+    "score": 0.9795673076923077
+}

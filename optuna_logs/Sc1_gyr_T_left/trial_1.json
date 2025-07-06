@@ -1,0 +1,14 @@
+{
+    "model_type": "CNN1D",
+    "filter_size": 31,
+    "kernel_size": 3,
+    "num_layers": 2,
+    "num_dense_layers": 2,
+    "dense_neurons": 184,
+    "dropout": 0.30000000000000004,
+    "learning_rate": 0.0006,
+    "decision_threshold": 0.8,
+    "lr": 0.00027809524967890316,
+    "trial_number": 1,
+    "score": 0.9018601667735728
+}

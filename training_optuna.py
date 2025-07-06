@@ -86,13 +86,13 @@ def run_optuna_for_combination(position, scenario):
 
     print(f"\n Running Optuna for: scenario={scenario}, position={position}")
 
-    pruner = SuccessiveHalvingPruner(min_resource=1, reduction_factor=3)
+    #pruner = SuccessiveHalvingPruner(min_resource=1, reduction_factor=3)
     storage_path = f"sqlite:///{os.path.join(save_dir, 'optuna_study.db')}"
 
     study = optuna.create_study(
         study_name=study_name,
         direction="maximize",
-        pruner=pruner,
+        #pruner=pruner,
         storage=storage_path,
         load_if_exists=True
     )
@@ -127,7 +127,7 @@ def run_optuna_for_combination(position, scenario):
     with open(os.path.join(save_dir, "best_score.txt"), "w") as f:
         f.write(f"{study.best_value:.4f}")
 
-    export_optuna_results(study, save_dir, best_model_filename, best_test_report, best_train_loss, best_valid_loss)
+    export_optuna_results(study, save_dir, best_test_report, best_train_loss, best_valid_loss)
 
 
 
@@ -140,25 +140,24 @@ if __name__ == "__main__":
     set_seed(42)
 
     # Run Optuna for the best-case scenarios (time vs frequency domain)
-    run_optuna_for_combination("chest", "Sc_4_T")
-    run_optuna_for_combination("chest", "Sc_4_F")
-
-    # Analyze the logged trials (from log_optuna_trial)
-    df = analyze_logged_trials(
-        log_csv="optuna_logs/optuna_trials.csv",
-        save_dir="optuna_results",
-        metric="score"
-    )
-
-    # Analyze the saved study database
-    df2 = analyze_optuna_study("Sc_4_T", "chest")
-
-    '''
+    #run_optuna_for_combination("chest", "Sc_4_T")
+    #run_optuna_for_combination("chest", "Sc_4_F")
+    
     for position in positions:
         for scenario in scenarios:
             try:
                 run_optuna_for_combination(position, scenario)
+                            
+                # Analyze the logged trials (from log_optuna_trial)
+                df = analyze_logged_trials(
+                    log_csv="optuna_logs/optuna_trials.csv",
+                    save_dir="optuna_results",
+                    metric="score"
+                )
+
+                # Analyze the saved study database
+                df2 = analyze_optuna_study(scenario, position)
             except Exception as e:
                 print(f"Error in scenario={scenario}, position={position}: {e}")
-    '''
+    
     
