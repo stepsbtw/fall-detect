@@ -1,46 +1,101 @@
-# Fall-Detect
-Adaptação para o PyTorch do trabalho original : https://AILAB-CEFET-RJ/falldetection
 
-Baseado no artigo - A Machine Learning Approach to Automatic Fall Detection of Soldiers: https://arxiv.org/abs/2501.15655v2
+# Deep Learning Pipeline for Wearable Sensor Data
 
-Além da adaptação, o modelo LSTM foi implementado e testado junto aos demais. 
+This project implements a flexible training pipeline using PyTorch for classifying data from wearable sensors. It supports multiple input types, label schemes, and neural network architectures, including **CNN1D**, **MLP**, and **LSTM**, with **Bayesian hyperparameter optimization via Optuna**.
 
-Os sensores no trabalho original não são combinados (left, chest, right), por motivos de "escolher o melhor". 
+---
 
-Podemos propor uma fusão dos dados, assim podemos aproveitar as nuances de cada sensor e obter o melhor modelo.
-
-Melhor ainda! Podemos fazer stacking entre os modelos treinados em cada sensor (pra poder receber input de cada um deles).
-
-### Antes de tudo
-Com o objetivo de isolar o projeto, é recomendado a criação de um ambiente virtual do python:
+## Project Structure
 
 ```
-python -m venv nome-do-enviroment
+project/
+│
+├── run.py                      # Main entry point: handles CLI, loading, training, saving
+├── train.py                    # Training, evaluation, and Optuna logic
+├── neural_networks.py          # CNN1D, MLP, and LSTM architecture definitions
+├── labels_and_data/            # Data and label arrays organized by sensor position
+│   ├── data/
+│   └── labels/
+└── output/                     # Automatically created: stores models, metrics, plots
 ```
 
-obs: Se possível, utilize o Python 3.10 para nenhum erro de compatibilidade entre bibliotecas do projeto.
+---
 
-## Importação dos dados
+## Quick Start
 
-Para execução desse repositório, será necessário utilizar os requisitos descritos no arquivo requirements.txt. É possivel instalar todos os pacotes necessários com o unico comando abaixo:
+### 1. Install Dependencies
 
-```
-cd fall-detect/
-pip install -r requirements.txt
-```
-
-Após instalação dos pacotes necessários, importaremos a base de dados a ser utilizada. Essa a base de dados encontra-se disponível publicamente [aqui](https://zenodo.org/records/12760391). 
-
-## Geração dos datasets 
-
-Uma vez com os pacotes necessários instalados e a base de dados baixada e **descompactada**. Será realizado a criação do dataset através dos comandos:
-```
-python generate_datasets.py chest
-python generate_datasets.py right
-python generate_datasets.py left
+```bash
+pip install torch scikit-learn matplotlib optuna numpy
 ```
 
-Uma vez com o dataset de cada modalidade (chest, right e left) criado é possivel seguir para a etapa de treinamento da Rede Neural.
+---
 
-## Treinamento e Nested Cross Validation
-Para o treinamento, execute o script `training_optuna.py`. O Optuna foi utilizado junto com Pruners para automatizar e otimizar o processo.
+### 2. Run Training with Optuna Optimization
+
+```bash
+python run.py \
+  --scenario Sc1_acc_T \
+  --position chest \
+  --label_type binary_one \
+  --neural_network_type LSTM
+```
+
+**Arguments:**
+
+| Argument             | Choices                                                                 | Description                                  |
+|----------------------|--------------------------------------------------------------------------|----------------------------------------------|
+| `--scenario`         | Sc1_acc_T, Sc1_gyr_T, ..., Sc_4_F                                        | Type of input signal & domain                |
+| `--position`         | left, chest, right                                                       | Sensor position                              |
+| `--label_type`       | multiple_one, multiple_two, binary_one, binary_two                       | Target label scheme                          |
+| `--neural_network_type` | CNN1D, MLP, LSTM                                                       | Type of neural network                       |
+
+---
+
+## Model Architectures
+
+- **CNN1DNet**: 1D convolutional architecture for time/frequency domain signal arrays
+- **MLPNet**: Fully connected feedforward network for flat feature vectors
+- **LSTMNet**: Recurrent model for sequential data, uses final hidden state for classification
+
+---
+
+## Features
+
+- **Optuna-based hyperparameter optimization**
+- Automated model training, evaluation, and saving
+- Supports multi-class and binary classification
+- Saves:
+  - `.pt` model files
+  - confusion matrices
+  - classification reports
+  - ROC curves (for binary)
+  - MCC, accuracy, sensitivity, specificity, precision
+
+---
+
+## Output Example
+
+```
+output/
+└── lstm/
+    └── chest/
+        └── Sc1_acc_T/
+            └── binary_one/
+                ├── model_1/
+                │   ├── model_1.pt
+                │   ├── confusion_matrix_model_1.png
+                │   ├── classification_report_model_1.txt
+                │   ├── roc_curve_model_1.png
+                │   └── metrics_model_1.csv
+                └── model_2/
+                    ...
+```
+
+---
+
+## Notes
+
+- LSTM input shape must be 3D: `(batch_size, sequence_length, input_dim)`
+- You can reshape flat arrays if needed: `X.reshape(samples, time_steps, 1)`
+- Optimization is repeated for **20 trials**, and final training is repeated **20 times** for robustness

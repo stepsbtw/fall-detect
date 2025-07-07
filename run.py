@@ -1,14 +1,33 @@
 import argparse
 import os
+import json
+import random
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
-from testing.train import train, save_results, run_optuna
-from testing.neural_networks import CNN1DNet, MLPNet, LSTMNet
+from utils import train, save_results, run_optuna, plot_loss_curve
+from neural_networks import CNN1DNet, MLPNet, LSTMNet
+import pandas as pd
 
-# --- Argumentos CLI ---
-parser = argparse.ArgumentParser(description="Otimização bayesiana + treinamento PyTorch")
+# ----------------------------- #
+#   Fixar Seeds (Reprodutível)  #
+# ----------------------------- #
+def set_seed(seed=42):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+set_seed()
+
+# ----------------------------- #
+#         Argumentos CLI        #
+# ----------------------------- #
+parser = argparse.ArgumentParser(description="Otimização Bayesiana e Treinamento PyTorch")
 
 parser.add_argument("--scenario", required=True, choices=[
     "Sc1_acc_T", "Sc1_gyr_T", "Sc1_acc_F", "Sc1_gyr_F",
@@ -17,22 +36,27 @@ parser.add_argument("--scenario", required=True, choices=[
 ])
 parser.add_argument("--position", required=True, choices=["left", "chest", "right"])
 parser.add_argument("--label_type", required=True, choices=["multiple_one", "multiple_two", "binary_one", "binary_two"])
-parser.add_argument("--neural_network_type", required=True, choices=["CNN1D", "MLP", "LSTM"])
+parser.add_argument("--neural_network_type", required=False, choices=["CNN1D", "MLP", "LSTM"])
 
 args = parser.parse_args()
 
-# --- Seleções do usuário ---
+# ----------------------------- #
+#         Configurações         #
+# ----------------------------- #
 position = args.position
 label_type = args.label_type
 scenario = args.scenario
-model_type = args.neural_network_type
+model_type_arg = args.neural_network_type
 num_labels = 37 if label_type == "multiple_one" else 26 if label_type == "multiple_two" else 2
 
-# --- Diretórios e arquivos ---
+# Diretórios
 root_dir = os.path.dirname(__file__)
 data_path = os.path.join(root_dir, "labels_and_data", "data", position)
 label_path = os.path.join(root_dir, "labels_and_data", "labels", position)
+base_out = os.path.join(root_dir, "output", "optuna", position, scenario, label_type)
+os.makedirs(base_out, exist_ok=True)
 
+# Tamanhos dos vetores
 array_size = 1020 if position == "chest" else 450
 
 scenarios = {
@@ -57,41 +81,36 @@ labels_dict = {
     "binary_two": "binary_class_label_2.npy",
 }
 
+# ----------------------------- #
+#     Carregar Dados e Split    #
+# ----------------------------- #
 X = np.load(os.path.join(data_path, scenarios[scenario][0]))
 y = np.load(os.path.join(label_path, labels_dict[label_type])).astype(np.int64)
 
-# Ajustar input_shape
-if model_type == "CNN1D":
-    input_shape = scenarios[scenario][1]
-elif model_type == "LSTM":
+if model_type_arg == "LSTM":
     if len(X.shape) == 2:
         X = X.reshape((X.shape[0], -1, 1))
-    input_shape = X.shape[1:]
-else:
-    input_shape = X.shape[1]
 
-# --- Split ---
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.4, random_state=42)
 X_val, X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
 
-# --- Dispositivo ---
+# ----------------------------- #
+#          Dispositivo          #
+# ----------------------------- #
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Usando dispositivo:", device)
 if torch.cuda.is_available():
     print("GPU:", torch.cuda.get_device_name(0))
 
-# --- Diretórios de saída ---
-base_out = os.path.join(root_dir, "output", model_type.lower(), position, scenario, label_type)
-os.makedirs(base_out, exist_ok=True)
+# ----------------------------- #
+#     Otimização com Optuna     #
+# ----------------------------- #
+print("\n Iniciando Otimização com Optuna...\n")
 
-# --- Otimização com Optuna ---
-print("\n Iniciando Otimização\n")
-
-# --- Precompute input shapes for all 3 model types ---
 input_shape_dict = {
     "CNN1D": scenarios[scenario][1],
-    "MLP": X.shape[1],
-    "LSTM": X.reshape((X.shape[0], -1, X.shape[1] // scenarios[scenario][1][1])).shape[1:]
+    "MLP": np.prod(scenarios[scenario][1]),
+    "LSTM": X.reshape((X.shape[0], -1, scenarios[scenario][1][1])).shape[1:]
 }
 
 study = run_optuna(
@@ -100,21 +119,34 @@ study = run_optuna(
     X_val, y_val,
     output_dir=base_out,
     num_labels=num_labels,
-    device=device
+    device=device,
+    restrict_model_type=model_type_arg
 )
 
-
 best_params = study.best_params
-print("\nMelhores parâmetros:", best_params)
+model_type = best_params["model_type"]
+print("\n Melhor modelo:", model_type)
+print(" Melhores parâmetros:", best_params)
 
-# --- Treinar modelos com os melhores parâmetros ---
-print("\n Iniciando Treinamento Final\n")
+# ----------------------------- #
+#      Treinamento Final        #
+# ----------------------------- #
+print("\n Iniciando Treinamento Final dos 20 Modelos...\n")
+
+# Ajustar input_shape
+if model_type == "CNN1D":
+    input_shape = scenarios[scenario][1]
+elif model_type == "LSTM":
+    input_shape = X.shape[1:]
+else:
+    input_shape = np.prod(scenarios[scenario][1])
 
 for i in range(1, 21):
     print(f"\n--- Modelo {i} ---\n")
     model_dir = os.path.join(base_out, f"model_{i}")
     os.makedirs(model_dir, exist_ok=True)
 
+    # Inicializar modelo
     if model_type == "CNN1D":
         model = CNN1DNet(
             input_shape=input_shape,
@@ -145,7 +177,7 @@ for i in range(1, 21):
 
     model.to(device)
 
-    # Loaders
+    # DataLoaders
     train_loader = DataLoader(TensorDataset(
         torch.tensor(X_train, dtype=torch.float32),
         torch.tensor(y_train, dtype=torch.long)
@@ -156,14 +188,17 @@ for i in range(1, 21):
         torch.tensor(y_val, dtype=torch.long)
     ), batch_size=32)
 
-    # Treino
-    import torch.nn as nn
     optimizer = torch.optim.Adam(model.parameters(), lr=best_params["lr"])
     criterion = nn.CrossEntropyLoss()
 
-    train(model, train_loader, val_loader, optimizer, criterion, device, epochs=25, early_stopping=True, patience=5)
+    y_pred, y_true, val_losses, train_losses = train(
+        model, train_loader, val_loader,
+        optimizer, criterion, device,
+        epochs=25, early_stopping=True, patience=5
+    )
 
-    # Avaliação e salvamento
+    plot_loss_curve(train_losses, val_losses, model_dir, i)
+
     save_results(
         model=model,
         val_loader=val_loader,
@@ -174,3 +209,24 @@ for i in range(1, 21):
         output_dir=model_dir,
         device=device
     )
+
+    # Salvar hiperparâmetros do modelo
+    with open(os.path.join(model_dir, "used_hyperparameters.json"), "w") as f:
+        json.dump(best_params, f, indent=4)
+
+# ----------------------------- #
+#     Gerar Resumo Final        #
+# ----------------------------- #
+summary_path = os.path.join(base_out, "summary_all_models.csv")
+results = []
+for i in range(1, 21):
+    path = os.path.join(base_out, f"model_{i}", f"metrics_model_{i}.csv")
+    if os.path.exists(path):
+        df = pd.read_csv(path)
+        results.append(df)
+
+if results:
+    pd.concat(results, ignore_index=True).to_csv(summary_path, index=False)
+    print(f"\n Resumo de resultados salvo em {summary_path}")
+else:
+    print("Nenhum resultado encontrado para gerar resumo.")

@@ -10,3 +10,6 @@ torch
 
 tensorboard
 torchmetrics
+
+optuna[visualization]
+kaleido
