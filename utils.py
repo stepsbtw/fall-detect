@@ -24,7 +24,7 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
     avg_train_losses, avg_val_losses = [], []
 
     for epoch in range(epochs):
-        print("\n Época {epoch}/{epochs}")
+        print(f"\n[{epoch}/{epochs}]")
         model.train()
         train_losses = []
 
@@ -144,7 +144,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_train, dtype=torch.float32),
                 torch.tensor(np.argmax(y_train, axis=1) if len(y_train.shape) > 1 else y_train, dtype=torch.long)
             ),
-            batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2
+            batch_size=batch_size, shuffle=True, pin_memory=True
         )
 
         val_loader = torch.utils.data.DataLoader(
@@ -152,7 +152,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_val, dtype=torch.float32),
                 torch.tensor(np.argmax(y_val, axis=1) if len(y_val.shape) > 1 else y_val, dtype=torch.long)
             ),
-            batch_size=batch_size, pin_memory=True, num_workers=2
+            batch_size=batch_size, pin_memory=True
         )
 
         y_pred, y_true, val_losses, train_losses = train(
