@@ -104,14 +104,14 @@ def objective(trial, input_shape_dict, X_train, y_train, X_val, y_val, output_di
     else:
         model_type = trial.suggest_categorical("model_type", ["CNN1D", "MLP", "LSTM"])
 
-    dropout = trial.suggest_float("dropout", 0.1, 0.5)
-    learning_rate = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-    decision_threshold = trial.suggest_float("decision_threshold", 0.5, 0.9)
+    dropout = trial.suggest_float('dropout', 0.1, 0.5, step=0.1)
+    learning_rate = trial.suggest_categorical('learning_rate', [0.0001, 0.0003, 0.0006, 0.001, 0.003, 0.006, 0.01])
+    decision_threshold = trial.suggest_float('decision_threshold', 0.5, 0.9, step=0.1)
 
     if model_type == "CNN1D":
-        filter_size = trial.suggest_int("filter_size", 8, 128)
+        filter_size = trial.suggest_int('filter_size', 8, 600, log=True)
         kernel_size = trial.suggest_int("kernel_size", 2, 6)
-        num_layers = trial.suggest_int("num_layers", 1, 4)
+        num_layers = trial.suggest_int('num_layers', 2, 4)
 
         max_seq_len = input_shape_dict["CNN1D"][0]
         reduced_seq_len = max_seq_len // (2 ** num_layers)
@@ -120,16 +120,16 @@ def objective(trial, input_shape_dict, X_train, y_train, X_val, y_val, output_di
             raise optuna.exceptions.TrialPruned()
 
         num_dense = trial.suggest_int("num_dense_layers", 1, 3)
-        dense_units = trial.suggest_int("dense_units", 64, 256)
-        model = CNN1DNet(input_shape_dict["CNN1D"], filter_size, kernel_size, num_layers, num_dense, dense_units, dropout, num_labels)
+        dense_neurons = trial.suggest_int('dense_neurons', 60, 320, log=True)
+        model = CNN1DNet(input_shape_dict["CNN1D"], filter_size, kernel_size, num_layers, num_dense, dense_neurons, dropout, num_labels)
 
     elif model_type == "MLP":
         num_layers = trial.suggest_int("num_layers", 1, 5)
-        dense_units = trial.suggest_int("dense_units", 64, 2048)
-        model = MLPNet(input_dim=input_shape_dict["MLP"], num_layers=num_layers, dense_neurons=dense_units, dropout=dropout, number_of_labels=num_labels)
+        dense_neurons = trial.suggest_int('dense_neurons', 20, 4000, log=True)
+        model = MLPNet(input_dim=input_shape_dict["MLP"], num_layers=num_layers, dense_neurons=dense_neurons, dropout=dropout, number_of_labels=num_labels)
 
     elif model_type == "LSTM":
-        hidden_dim = trial.suggest_int("hidden_dim", 32, 256)
+        hidden_dim = trial.suggest_int("hidden_dim", 32, 512, log=True)
         num_layers = trial.suggest_int("num_layers", 1, 3)
         model = LSTMNet(input_dim=input_shape_dict["LSTM"][1], hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout, number_of_labels=num_labels)
 

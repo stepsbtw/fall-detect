@@ -1,80 +1,88 @@
+# Fall Detect PyTorch
 
-# Deep Learning Pipeline for Wearable Sensor Data
+Adaptação para o PyTorch do trabalho original : https://AILAB-CEFET-RJ/falldetection
 
-This project implements a flexible training pipeline using PyTorch for classifying data from wearable sensors. It supports multiple input types, label schemes, and neural network architectures, including **CNN1D**, **MLP**, and **LSTM**, with **Bayesian hyperparameter optimization via Optuna**.
+Baseado no artigo - A Machine Learning Approach to Automatic Fall Detection of Soldiers: https://arxiv.org/abs/2501.15655v2
+
+Além da adaptação, o modelo LSTM foi implementado e testado junto aos demais.
+
+Os sensores no trabalho original não são combinados (left, chest, right), por motivos de "escolher o melhor".
+
+Suporta 3 arquiteturas de redes neurais, **CNN1D**, **MLP** e **LSTM**, com **otimização bayesiana de hiperparâmetros via Optuna**.
 
 ---
 
-## Project Structure
+## Estrutura do Projeto
 
 ```
 project/
 │
-├── run.py                      # Main entry point: handles CLI, loading, training, saving
-├── train.py                    # Training, evaluation, and Optuna logic
-├── neural_networks.py          # CNN1D, MLP, and LSTM architecture definitions
-├── labels_and_data/            # Data and label arrays organized by sensor position
+├── generate_datasets.py        # Ponto de partida: cria rótulos e datasets a partir do IPQM-Fall
+├── run.py                      # Arquivo principal: CLI, carregamento, treinamento e salvamento
+├── train.py                    # Lógica de treinamento, avaliação e Optuna
+├── neural_networks.py          # Arquiteturas: CNN1D, MLP e LSTM
+├── labels_and_data/            # Dados e rótulos organizados por posição do sensor
 │   ├── data/
 │   └── labels/
-└── output/                     # Automatically created: stores models, metrics, plots
+└── output/                     # Criado automaticamente: armazena modelos, métricas e gráficos
 ```
 
 ---
 
-## Quick Start
+## Início Rápido
 
-### 1. Install Dependencies
+### 1. Instale as dependências
 
 ```bash
-pip install torch scikit-learn matplotlib optuna numpy
+pip install -r requirements.txt
 ```
 
 ---
 
-### 2. Run Training with Optuna Optimization
+### 2. Execute o Treinamento com Otimização via Optuna
 
 ```bash
 python run.py \
   --scenario Sc1_acc_T \
   --position chest \
   --label_type binary_one \
-  --neural_network_type LSTM
+  --nn CNN1D
 ```
 
-**Arguments:**
+#### Argumentos:
 
-| Argument             | Choices                                                                 | Description                                  |
-|----------------------|--------------------------------------------------------------------------|----------------------------------------------|
-| `--scenario`         | Sc1_acc_T, Sc1_gyr_T, ..., Sc_4_F                                        | Type of input signal & domain                |
-| `--position`         | left, chest, right                                                       | Sensor position                              |
-| `--label_type`       | multiple_one, multiple_two, binary_one, binary_two                       | Target label scheme                          |
-| `--neural_network_type` | CNN1D, MLP, LSTM                                                       | Type of neural network                       |
-
----
-
-## Model Architectures
-
-- **CNN1DNet**: 1D convolutional architecture for time/frequency domain signal arrays
-- **MLPNet**: Fully connected feedforward network for flat feature vectors
-- **LSTMNet**: Recurrent model for sequential data, uses final hidden state for classification
+| Argumento                | Opções                                               | Descrição                                      |
+|--------------------------|------------------------------------------------------|------------------------------------------------|
+| `--scenario`             | Sc1_acc_T, Sc1_gyr_T, ..., Sc_4_F                    | Tipo de sinal e domínio                        |
+| `--position`             | left, chest, right                                   | Posição do sensor                              |
+| `--label_type`           | multiple_one, multiple_two, binary_one, binary_two   | Tipo de rótulo (target)                        |
+| `--nn` (opcional) | CNN1D, MLP, LSTM                        | Arquitetura da rede neural                     |
 
 ---
 
-## Features
+## Arquiteturas Suportadas
 
-- **Optuna-based hyperparameter optimization**
-- Automated model training, evaluation, and saving
-- Supports multi-class and binary classification
-- Saves:
-  - `.pt` model files
-  - confusion matrices
-  - classification reports
-  - ROC curves (for binary)
-  - MCC, accuracy, sensitivity, specificity, precision
+- **CNN1DNet**: Convoluções 1D para sinais no tempo ou frequência  
+- **MLPNet**: Rede neural totalmente conectada para vetores planos  
+- **LSTMNet**: Modelo recorrente para sequências temporais  
 
 ---
 
-## Output Example
+## Funcionalidades
+
+- Otimização de hiperparâmetros com **Optuna**
+- Treinamento e avaliação automáticos
+- Suporte a classificação **binária** (e futuramente **multiclasse**)
+- Salva:
+  - Modelos `.pt`
+  - Matrizes de confusão
+  - Relatórios de classificação
+  - Curvas ROC (para problemas binários)
+  - Métricas como MCC, acurácia, sensibilidade, especificidade e precisão
+
+---
+
+## Exemplo de Saída
 
 ```
 output/
@@ -94,8 +102,15 @@ output/
 
 ---
 
-## Notes
+## Observações
 
-- LSTM input shape must be 3D: `(batch_size, sequence_length, input_dim)`
-- You can reshape flat arrays if needed: `X.reshape(samples, time_steps, 1)`
-- Optimization is repeated for **20 trials**, and final training is repeated **20 times** for robustness
+- A otimização via Optuna é repetida por **30 experimentos (trials)**
+- O treinamento final é repetido **20 vezes** para garantir robustez
+- **Early Stopping** está implementado
+- Utiliza **Optuna Median Pruner** para interromper execuções com baixo desempenho
+
+---
+
+## Requisitos
+
+Para minimizar conflitos, priorize utilizar o Python 3.10

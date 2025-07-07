@@ -36,7 +36,7 @@ parser.add_argument("--scenario", required=True, choices=[
 ])
 parser.add_argument("--position", required=True, choices=["left", "chest", "right"])
 parser.add_argument("--label_type", required=True, choices=["multiple_one", "multiple_two", "binary_one", "binary_two"])
-parser.add_argument("--neural_network_type", required=False, choices=["CNN1D", "MLP", "LSTM"])
+parser.add_argument("--nn", required=False, choices=["CNN1D", "MLP", "LSTM"])
 
 args = parser.parse_args()
 
@@ -46,7 +46,7 @@ args = parser.parse_args()
 position = args.position
 label_type = args.label_type
 scenario = args.scenario
-model_type_arg = args.neural_network_type
+model_type_arg = args.nn
 num_labels = 37 if label_type == "multiple_one" else 26 if label_type == "multiple_two" else 2
 
 # Diretórios
