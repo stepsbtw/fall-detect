@@ -65,6 +65,7 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
                 if patience_counter >= patience:
                     print(f"Early stopping at epoch {epoch + 1}")
                     break
+    torch.cuda.empty_cache()
 
     if early_stopping and best_model_state is not None:
         model.load_state_dict(best_model_state)
@@ -181,6 +182,10 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
         
+        del model
+        del optimizer
+        torch.cuda.empty_cache()
+        
         # --- Salvar curva de perda por fold ---
         fold_dir = os.path.join(output_dir, f"trial_{trial.number}")
         os.makedirs(fold_dir, exist_ok=True)
@@ -203,6 +208,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
         plt.savefig(os.path.join(fold_dir, f"loss_curve_fold_{fold_idx + 1}.png"))
         plt.close()
 
+
     # Média do MCC entre folds
     mean_mcc = np.mean(mcc_scores)
 
@@ -224,7 +230,7 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels,
             direction="maximize",
             study_name=study_name,
             storage=storage_url,
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5),
+            pruner=optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=3),
             load_if_exists=True
         )
         print(f"Novo estudo criado e salvo em: {db_path}")

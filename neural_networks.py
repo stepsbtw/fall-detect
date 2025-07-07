@@ -2,10 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
 class CNN1DNet(nn.Module):
     def __init__(self, input_shape, filter_size, kernel_size, num_layers,
                  num_dense_layers, dense_neurons, dropout, number_of_labels):
