@@ -16,7 +16,7 @@ from sklearn.metrics import f1_score
 import json
 
 def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=25, early_stopping=False, patience=5):
-    model.to(device)
+    model.to(device, non_blocking=True)
     best_val_loss = float('inf')
     patience_counter = 0
     best_model_state = None
@@ -29,7 +29,7 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
         train_losses = []
 
         for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
+            xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
             optimizer.zero_grad()
             out = model(xb)
             loss = criterion(out, yb)
@@ -45,7 +45,7 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
         val_losses, y_true, y_pred = [], [], []
         with torch.no_grad():
             for xb, yb in val_loader:
-                xb, yb = xb.to(device), yb.to(device)
+                xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
                 out = model(xb)
                 loss = criterion(out, yb)
                 val_losses.append(loss.item())
@@ -73,7 +73,7 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
         val_losses, y_pred, y_true = [], [], []
         with torch.no_grad():
             for xb, yb in val_loader:
-                xb, yb = xb.to(device), yb.to(device)
+                xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
                 out = model(xb)
                 loss = criterion(out, yb)
                 val_losses.append(loss.item())
@@ -121,21 +121,21 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
             num_dense = trial.suggest_int("num_dense_layers", 1, 3)
             dense_neurons = trial.suggest_int('dense_neurons', 60, 320, log=True)
             model = CNN1DNet(input_shape_dict["CNN1D"], filter_size, kernel_size, num_layers, num_dense, dense_neurons, dropout, num_labels)
-            batch_size = 8
+            batch_size = 32
 
         elif model_type == "MLP":
             num_layers = trial.suggest_int("num_layers", 1, 5)
             dense_neurons = trial.suggest_int('dense_neurons', 20, 4000, log=True)
             model = MLPNet(input_dim=input_shape_dict["MLP"], num_layers=num_layers, dense_neurons=dense_neurons, dropout=dropout, number_of_labels=num_labels)
-            batch_size = 32
+            batch_size = 64
 
         elif model_type == "LSTM":
             hidden_dim = trial.suggest_int("hidden_dim", 32, 512, log=True)
             num_layers = trial.suggest_int("num_layers", 1, 3)
             model = LSTMNet(input_dim=input_shape_dict["LSTM"][1], hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout, number_of_labels=num_labels)
-            batch_size = 16
+            batch_size = 32
 
-        model.to(device)
+        model.to(device, non_blocking=True)
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         criterion = torch.nn.CrossEntropyLoss()
 
@@ -144,7 +144,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_train, dtype=torch.float32),
                 torch.tensor(np.argmax(y_train, axis=1) if len(y_train.shape) > 1 else y_train, dtype=torch.long)
             ),
-            batch_size=batch_size, shuffle=True, pin_memory=True
+            batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2
         )
 
         val_loader = torch.utils.data.DataLoader(
@@ -152,12 +152,12 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_val, dtype=torch.float32),
                 torch.tensor(np.argmax(y_val, axis=1) if len(y_val.shape) > 1 else y_val, dtype=torch.long)
             ),
-            batch_size=batch_size, pin_memory=True
+            batch_size=batch_size, pin_memory=True, num_workers=2
         )
 
         y_pred, y_true, val_losses, train_losses = train(
             model, train_loader, val_loader, optimizer, criterion, device,
-            epochs=15, early_stopping=False, patience=None
+            epochs=25, early_stopping=False, patience=None
         )
 
         all_train_losses.append(train_losses)
@@ -168,7 +168,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
             model.eval()
             with torch.no_grad():
                 for xb, _ in val_loader:
-                    xb = xb.to(device)
+                    xb = xb.to(device, non_blocking=True)
                     out = model(xb)
                     probs = F.softmax(out, dim=1)[:, 1].cpu().numpy()
                     y_probs.extend(probs)
@@ -230,7 +230,7 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels,
             direction="maximize",
             study_name=study_name,
             storage=storage_url,
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=3),
+            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5),
             load_if_exists=True
         )
         print(f"Novo estudo criado e salvo em: {db_path}")
@@ -280,7 +280,7 @@ def save_results(model, val_loader, y_val_onehot, number_of_labels, i, decision_
     y_true = []
     with torch.no_grad():
         for xb, yb in val_loader:
-            xb = xb.to(device)
+            xb = xb.to(device, non_blocking=True)
             out = model(xb)
             probs = F.softmax(out, dim=1).cpu().numpy()
             y_probs.extend(probs)
