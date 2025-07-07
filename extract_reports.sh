@@ -7,12 +7,13 @@ sensores=("chest" "right" "left")
 labels=("binary_one" "binary_two")
 
 # Loop aninhado
-for cenario in "${cenarios[@]}"; do
-    for nn in "${redenerural[@]}"; do
+
+for label in "${labels[@]}"; do
+    for cenario in "${cenarios[@]}"; do
         for sensor in "${sensores[@]}"; do
-            for label in "${labels[@]}"; do
-                echo "Criando ${cenario}_${nn}_${sensor}_${label}.json..."
-                python training.py -s "$cenario" -p "$sensor" -nn "$nn" -l "$label"
+            for nn in "${redenerural[@]}"; do
+                echo "${cenario} ${nn} ${sensor} ${label}"
+                python run.py -scenario "$cenario" -position "$sensor" -label_type "$label" --nn "$nn"
             done
         done
     done
