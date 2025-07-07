@@ -29,13 +29,13 @@ set_seed()
 # ----------------------------- #
 parser = argparse.ArgumentParser(description="Otimização Bayesiana e Treinamento PyTorch")
 
-parser.add_argument("--scenario", required=True, choices=[
+parser.add_argument("-s", required=True, choices=[
     "Sc1_acc_T", "Sc1_gyr_T", "Sc1_acc_F", "Sc1_gyr_F",
     "Sc_2_acc_T", "Sc_2_gyr_T", "Sc_2_acc_F", "Sc_2_gyr_F",
     "Sc_3_T", "Sc_3_F", "Sc_4_T", "Sc_4_F"
 ])
-parser.add_argument("--position", required=True, choices=["left", "chest", "right"])
-parser.add_argument("--label_type", required=True, choices=["multiple_one", "multiple_two", "binary_one", "binary_two"])
+parser.add_argument("--p", required=True, choices=["left", "chest", "right"])
+parser.add_argument("--l", required=True, choices=["multiple_one", "multiple_two", "binary_one", "binary_two"])
 parser.add_argument("--nn", required=False, choices=["CNN1D", "MLP", "LSTM"])
 
 args = parser.parse_args()
