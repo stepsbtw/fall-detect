@@ -121,19 +121,19 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
             num_dense = trial.suggest_int("num_dense_layers", 1, 3)
             dense_neurons = trial.suggest_int('dense_neurons', 60, 320, log=True)
             model = CNN1DNet(input_shape_dict["CNN1D"], filter_size, kernel_size, num_layers, num_dense, dense_neurons, dropout, num_labels)
-            batch_size = 16
+            batch_size = 8
 
         elif model_type == "MLP":
             num_layers = trial.suggest_int("num_layers", 1, 5)
             dense_neurons = trial.suggest_int('dense_neurons', 20, 4000, log=True)
             model = MLPNet(input_dim=input_shape_dict["MLP"], num_layers=num_layers, dense_neurons=dense_neurons, dropout=dropout, number_of_labels=num_labels)
-            batch_size = 64
+            batch_size = 32
 
         elif model_type == "LSTM":
             hidden_dim = trial.suggest_int("hidden_dim", 32, 512, log=True)
             num_layers = trial.suggest_int("num_layers", 1, 3)
             model = LSTMNet(input_dim=input_shape_dict["LSTM"][1], hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout, number_of_labels=num_labels)
-            batch_size = 32
+            batch_size = 16
 
         model.to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)

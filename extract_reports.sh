@@ -9,8 +9,8 @@ labels=("binary_one" "binary_two")
 # Loop aninhado
 
 for label in "${labels[@]}"; do
-    for cenario in "${cenarios[@]}"; do
-        for sensor in "${sensores[@]}"; do
+    for sensor in "${sensores[@]}"; do
+        for cenario in "${cenarios[@]}"; do
             for nn in "${redeneural[@]}"; do
                 result_file="output/optuna/${nn}/${sensor}/${cenario}/${label}/optuna_trials.csv"
 
