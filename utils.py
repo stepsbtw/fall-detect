@@ -24,6 +24,7 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
     avg_train_losses, avg_val_losses = [], []
 
     for epoch in range(epochs):
+        print("\n Época {epoch}/{epochs}")
         model.train()
         train_losses = []
 
@@ -81,25 +82,8 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
 
     return y_pred, y_true, avg_val_losses, avg_train_losses
 
-
-
-def plot_loss_curve(train_losses, val_losses, output_dir, model_idx):
-    import matplotlib.pyplot as plt
-    epochs = range(1, len(train_losses) + 1)
-    plt.figure()
-    plt.plot(epochs, train_losses, label="Train Loss")
-    plt.plot(epochs, val_losses, label="Validation Loss")
-    plt.xlabel("Epochs")
-    plt.ylabel("Loss")
-    plt.title(f"Loss Curve - Model {model_idx}")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(os.path.join(output_dir, f"loss_curve_model_{model_idx}.png"))
-    plt.close()
-
-
 def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_labels, device, restrict_model_type=None):
-
+    print(f"\nIniciando Trial #{trial.number}\n")
     if restrict_model_type:
         model_type = restrict_model_type
     else:
@@ -113,9 +97,9 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
     all_train_losses = []
     all_val_losses = []
 
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
     for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_trainval, y_trainval.argmax(axis=1) if len(y_trainval.shape) > 1 else y_trainval)):
-        
+        print(f"\n Fold {fold_idx +1}/{skf.get_n_splits()} ({model_type})")
         # Garantir reprodutibilidade dentro de cada fold
         torch.manual_seed(42 + fold_idx)
         torch.cuda.manual_seed_all(42 + fold_idx)
@@ -159,7 +143,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_train, dtype=torch.float32),
                 torch.tensor(np.argmax(y_train, axis=1) if len(y_train.shape) > 1 else y_train, dtype=torch.long)
             ),
-            batch_size=batch_size, shuffle=True, pin_memory=True
+            batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2
         )
 
         val_loader = torch.utils.data.DataLoader(
@@ -167,12 +151,12 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_val, dtype=torch.float32),
                 torch.tensor(np.argmax(y_val, axis=1) if len(y_val.shape) > 1 else y_val, dtype=torch.long)
             ),
-            batch_size=batch_size, pin_memory=True
+            batch_size=batch_size, pin_memory=True, num_workers=2
         )
 
         y_pred, y_true, val_losses, train_losses = train(
             model, train_loader, val_loader, optimizer, criterion, device,
-            epochs=20, early_stopping=True, patience=5
+            epochs=15, early_stopping=False, patience=None
         )
 
         all_train_losses.append(train_losses)
@@ -196,32 +180,35 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
 
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
+        
+        # --- Salvar curva de perda por fold ---
+        fold_dir = os.path.join(output_dir, f"trial_{trial.number}")
+        os.makedirs(fold_dir, exist_ok=True)
+        csv_fold_path = os.path.join(fold_dir, f"losses_fold_{fold_idx + 1}.csv")
+        with open(csv_fold_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["epoch", "train_loss", "val_loss"])
+            for epoch in range(len(train_losses)):
+                writer.writerow([epoch + 1, train_losses[epoch], val_losses[epoch]])
 
-    # --- salvar curva de perda média ---
-    min_len = min(len(l) for l in all_train_losses)
-    mean_train = np.mean([l[:min_len] for l in all_train_losses], axis=0)
-    mean_val = np.mean([l[:min_len] for l in all_val_losses], axis=0)
+        # --- Plotar curva de perda do fold individual ---
+        plt.figure()
+        plt.plot(range(1, len(train_losses) + 1), train_losses, label="Train Loss")
+        plt.plot(range(1, len(val_losses) + 1), val_losses, label="Validation Loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title(f"Loss Curve - Trial {trial.number} - Fold {fold_idx + 1}")
+        plt.legend()
+        plt.grid()
+        plt.savefig(os.path.join(fold_dir, f"loss_curve_fold_{fold_idx + 1}.png"))
+        plt.close()
 
-    plt.figure()
-    plt.plot(range(1, min_len+1), mean_train, label="Train Loss (mean)")
-    plt.plot(range(1, min_len+1), mean_val, label="Validation Loss (mean)")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title(f"Mean Loss Curve - Trial {trial.number}")
-    plt.legend()
-    plt.grid()
-    plt.savefig(os.path.join(output_dir, f"loss_curve_trial_{trial.number}_mean.png"))
-    plt.close()
+    # Média do MCC entre folds
+    mean_mcc = np.mean(mcc_scores)
 
-    csv_path = os.path.join(output_dir, f"losses_trial_{trial.number}_mean.csv")
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["epoch", "mean_train_loss", "mean_val_loss"])
-        for i in range(min_len):
-            writer.writerow([i+1, mean_train[i], mean_val[i]])
+    print(f"Trial {trial.number} - Média MCC: {mean_mcc:.4f}")
 
     return np.mean(mcc_scores)
-
 
 def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels, device, study_name, restrict_model_type=None):
 
@@ -252,7 +239,7 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels,
         num_labels,
         device,
         restrict_model_type
-    ), n_trials=30, n_jobs=1)
+    ), n_trials=15, n_jobs=1)
 
     print("Melhor MCC:", study.best_value)
     print("Melhores hiperparâmetros:", study.best_params)
@@ -394,3 +381,17 @@ def record_metrics(metrics, tp, tn, fp, fn, i, output_dir):
             "fp": fp,
             "fn": fn
         })
+
+def plot_loss_curve(train_losses, val_losses, output_dir, model_idx):
+    import matplotlib.pyplot as plt
+    epochs = range(1, len(train_losses) + 1)
+    plt.figure()
+    plt.plot(epochs, train_losses, label="Train Loss")
+    plt.plot(epochs, val_losses, label="Validation Loss")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.title(f"Loss Curve - Model {model_idx}")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(output_dir, f"loss_curve_model_{model_idx}.png"))
+    plt.close()

@@ -12,4 +12,5 @@ tensorboard
 torchmetrics
 
 optuna[visualization]
+kaleido
 plotly
