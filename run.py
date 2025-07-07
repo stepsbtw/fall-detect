@@ -91,8 +91,9 @@ if model_type_arg == "LSTM":
     if len(X.shape) == 2:
         X = X.reshape((X.shape[0], -1, 1))
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.4, random_state=42)
-X_val, X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
+# 80% para treino/validação (cross-validation), 20% para teste final
+X_trainval, X_test, y_trainval, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
 
 # ----------------------------- #
 #          Dispositivo          #
@@ -110,29 +111,30 @@ print("\n Iniciando Otimização com Optuna...\n")
 input_shape_dict = {
     "CNN1D": scenarios[scenario][1],
     "MLP": np.prod(scenarios[scenario][1]),
-    "LSTM": X.reshape((X.shape[0], -1, scenarios[scenario][1][1])).shape[1:]
+    "LSTM": X_trainval.reshape((X_trainval.shape[0], -1, scenarios[scenario][1][1])).shape[1:]
 }
 
 study = run_optuna(
-    input_shape_dict,
-    X_train, y_train,
-    X_val, y_val,
+    input_shape_dict=input_shape_dict,
+    X_trainval=X_trainval,
+    y_trainval=y_trainval,
     output_dir=base_out,
     num_labels=num_labels,
     device=device,
     restrict_model_type=model_type_arg,
-    study_name= f"{scenario}_{position}_{label_type}_{model_type_arg}" if model_type_arg else f"{scenario}_{position}_{label_type}"
+    study_name=f"{scenario}_{position}_{label_type}_{model_type_arg}" if model_type_arg else f"{scenario}_{position}_{label_type}"
 )
 
+
 best_params = study.best_params
-model_type = best_params["model_type"]
+model_type = best_params["model_type"] if not model_type_arg else model_type_arg
 print("\n Melhor modelo:", model_type)
 print(" Melhores parâmetros:", best_params)
 
 # ----------------------------- #
 #      Treinamento Final        #
 # ----------------------------- #
-print("\n Iniciando Treinamento Final dos 20 Modelos...\n")
+print("\n Iniciando Treinamento Final dos 20 Modelos com Avaliação no Teste...\n")
 
 # Ajustar input_shape
 if model_type == "CNN1D":
@@ -159,6 +161,7 @@ for i in range(1, 21):
             dropout=best_params["dropout"],
             number_of_labels=num_labels
         )
+        batch_size = 16
     elif model_type == "MLP":
         model = MLPNet(
             input_dim=input_shape,
@@ -167,6 +170,7 @@ for i in range(1, 21):
             dropout=best_params["dropout"],
             number_of_labels=num_labels
         )
+        batch_size = 64
     elif model_type == "LSTM":
         model = LSTMNet(
             input_dim=input_shape[1],
@@ -175,25 +179,27 @@ for i in range(1, 21):
             dropout=best_params["dropout"],
             number_of_labels=num_labels
         )
+        batch_size = 32
 
     model.to(device)
 
-    # DataLoaders
+    # treino final em val+train
     train_loader = DataLoader(TensorDataset(
-        torch.tensor(X_train, dtype=torch.float32),
-        torch.tensor(y_train, dtype=torch.long)
-    ), batch_size=32, shuffle=True)
+        torch.tensor(X_trainval, dtype=torch.float32),
+        torch.tensor(y_trainval, dtype=torch.long)
+    ), batch_size=batch_size, shuffle=True, pin_memory=True)
 
-    val_loader = DataLoader(TensorDataset(
-        torch.tensor(X_val, dtype=torch.float32),
-        torch.tensor(y_val, dtype=torch.long)
-    ), batch_size=32)
+    # corretamente usando teste
+    test_loader = DataLoader(TensorDataset(
+        torch.tensor(X_test, dtype=torch.float32),
+        torch.tensor(y_test, dtype=torch.long)
+    ), batch_size=batch_size, pin_memory=True)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=best_params["lr"])
     criterion = nn.CrossEntropyLoss()
 
     y_pred, y_true, val_losses, train_losses = train(
-        model, train_loader, val_loader,
+        model, train_loader, test_loader,
         optimizer, criterion, device,
         epochs=25, early_stopping=True, patience=5
     )
@@ -202,8 +208,8 @@ for i in range(1, 21):
 
     save_results(
         model=model,
-        val_loader=val_loader,
-        y_val_onehot=y_val,
+        val_loader=test_loader,  
+        y_val_onehot=y_test,     
         number_of_labels=num_labels,
         i=i,
         decision_threshold=best_params["decision_threshold"],
@@ -211,23 +217,5 @@ for i in range(1, 21):
         device=device
     )
 
-    # Salvar hiperparâmetros do modelo
     with open(os.path.join(model_dir, "used_hyperparameters.json"), "w") as f:
         json.dump(best_params, f, indent=4)
-
-# ----------------------------- #
-#     Gerar Resumo Final        #
-# ----------------------------- #
-summary_path = os.path.join(base_out, "summary_all_models.csv")
-results = []
-for i in range(1, 21):
-    path = os.path.join(base_out, f"model_{i}", f"metrics_model_{i}.csv")
-    if os.path.exists(path):
-        df = pd.read_csv(path)
-        results.append(df)
-
-if results:
-    pd.concat(results, ignore_index=True).to_csv(summary_path, index=False)
-    print(f"\n Resumo de resultados salvo em {summary_path}")
-else:
-    print("Nenhum resultado encontrado para gerar resumo.")

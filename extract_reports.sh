@@ -24,7 +24,3 @@ for label in "${labels[@]}"; do
         done
     done
 done
-
-
-# Agrupando resultados
-python agg_results.py
