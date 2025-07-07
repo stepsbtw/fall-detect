@@ -13,3 +13,4 @@ torchmetrics
 
 optuna[visualization]
 kaleido
+plotly

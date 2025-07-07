@@ -207,11 +207,10 @@ def objective(trial, input_shape_dict, X_train, y_train, X_val, y_val, output_di
 
 
 
-def run_optuna(input_shape_dict, X_train, y_train, X_val, y_val, output_dir, num_labels, device, restrict_model_type=None):
+def run_optuna(input_shape_dict, X_train, y_train, X_val, y_val, output_dir, num_labels, device, study_name, restrict_model_type=None):
 
     db_path = os.path.join(output_dir, "optuna_study.db")
     storage_url = f"sqlite:///{db_path}"
-    study_name = "fall_detection_study"
 
     # Tenta carregar o estudo se já existe, senão cria novo
     try:

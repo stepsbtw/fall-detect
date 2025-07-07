@@ -53,7 +53,7 @@ num_labels = 37 if label_type == "multiple_one" else 26 if label_type == "multip
 root_dir = os.path.dirname(__file__)
 data_path = os.path.join(root_dir, "labels_and_data", "data", position)
 label_path = os.path.join(root_dir, "labels_and_data", "labels", position)
-base_out = os.path.join(root_dir, "output", "optuna", position, scenario, label_type)
+base_out = os.path.join(root_dir, "output", "optuna", model_type_arg, position, scenario, label_type)
 os.makedirs(base_out, exist_ok=True)
 
 # Tamanhos dos vetores
@@ -120,7 +120,8 @@ study = run_optuna(
     output_dir=base_out,
     num_labels=num_labels,
     device=device,
-    restrict_model_type=model_type_arg
+    restrict_model_type=model_type_arg,
+    study_name= f"{scenario}_{position}_{label_type}_{model_type_arg}" if model_type_arg else f"{scenario}_{position}_{label_type}"
 )
 
 best_params = study.best_params
