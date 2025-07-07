@@ -43,9 +43,9 @@ pip install -r requirements.txt
 
 ```bash
 python run.py \
-  --scenario Sc1_acc_T \
-  --position chest \
-  --label_type binary_one \
+  -scenario Sc1_acc_T \
+  -position chest \
+  -label_type binary_one \
   --nn CNN1D
 ```
 
@@ -53,9 +53,9 @@ python run.py \
 
 | Argumento                | Opções                                               | Descrição                                      |
 |--------------------------|------------------------------------------------------|------------------------------------------------|
-| `--scenario`             | Sc1_acc_T, Sc1_gyr_T, ..., Sc_4_F                    | Tipo de sinal e domínio                        |
-| `--position`             | left, chest, right                                   | Posição do sensor                              |
-| `--label_type`           | multiple_one, multiple_two, binary_one, binary_two   | Tipo de rótulo (target)                        |
+| `-scenario`             | Sc1_acc_T, Sc1_gyr_T, ..., Sc_4_F                    | Tipo de sinal e domínio                        |
+| `-position`             | left, chest, right                                   | Posição do sensor                              |
+| `-label_type`           | multiple_one, multiple_two, binary_one, binary_two   | Tipo de rótulo (target)                        |
 | `--nn` (opcional) | CNN1D, MLP, LSTM                        | Arquitetura da rede neural                     |
 
 ---
@@ -106,7 +106,7 @@ output/
 
 - A otimização via Optuna é repetida por **30 experimentos (trials)**
 - O treinamento final é repetido **20 vezes** para garantir robustez
-- **Early Stopping** está implementado
+- **Early Stopping** está implementado com patience = 5
 - Utiliza **Optuna Median Pruner** para interromper execuções com baixo desempenho
 
 ---
