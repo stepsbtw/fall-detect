@@ -39,7 +39,17 @@ pip install -r requirements.txt
 
 ---
 
-### 2. Execute o Treinamento com Otimização via Optuna
+### 2. Baixe e Descompacte os Dados Originais
+Disponível em: https://zenodo.org/records/12760391
+
+### 3. Gere os Datasets e Labels
+```bash
+python generate_datasets.py chest
+python generate_datasets.py left
+python generate_datasets.py right
+```
+
+### Alternativa 1: Execute o Treinamento com Optuna via CLI
 
 ```bash
 python run.py \
@@ -59,6 +69,14 @@ python run.py \
 | `--nn` (opcional) | CNN1D, MLP, LSTM                        | Arquitetura da rede neural                     |
 
 ---
+
+## Alternativa 2: Use o Script Automatizado
+
+Treinará todas as possíveis combinações de modelos, cenários, rótulos e sensores, efetuará a busca de hiperparâmetros com o Optuna.
+
+```bash
+./extract_reports.sh
+```
 
 ## Arquiteturas Suportadas
 
