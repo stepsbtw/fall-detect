@@ -129,7 +129,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
             num_layers = trial.suggest_int("num_layers", 1, 5)
             dense_neurons = trial.suggest_int('dense_neurons', 20, 4000, log=True)
             model = MLPNet(input_dim=input_shape_dict["MLP"], num_layers=num_layers, dense_neurons=dense_neurons, dropout=dropout, number_of_labels=num_labels)
-            batch_size = 128
+            batch_size = len(y_train)//30 # leandro fez assim
 
         elif model_type == "LSTM":
             hidden_dim = trial.suggest_int("hidden_dim", 32, 512, log=True)
