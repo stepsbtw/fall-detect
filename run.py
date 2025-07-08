@@ -174,7 +174,7 @@ def main():
                 dropout=best_params["dropout"],
                 number_of_labels=num_labels
             )
-            batch_size = 64
+            batch_size = 128
         elif model_type == "LSTM":
             model = LSTMNet(
                 input_dim=input_shape[1],
@@ -191,13 +191,13 @@ def main():
         train_loader = DataLoader(TensorDataset(
             torch.tensor(X_trainval, dtype=torch.float32),
             torch.tensor(y_trainval, dtype=torch.long)
-        ), batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2)
+        ), batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=6)
 
         # corretamente usando teste
         test_loader = DataLoader(TensorDataset(
             torch.tensor(X_test, dtype=torch.float32),
             torch.tensor(y_test, dtype=torch.long)
-        ), batch_size=batch_size, pin_memory=True, num_workers=2)
+        ), batch_size=batch_size, pin_memory=True, num_workers=6)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=best_params["lr"])
         criterion = nn.CrossEntropyLoss()

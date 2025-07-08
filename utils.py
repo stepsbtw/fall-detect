@@ -3,6 +3,8 @@ from sklearn.metrics import matthews_corrcoef
 import torch.nn.functional as F
 import optuna
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, classification_report, roc_curve, roc_auc_score
 import os
@@ -98,7 +100,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
     all_train_losses = []
     all_val_losses = []
 
-    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_trainval, y_trainval.argmax(axis=1) if len(y_trainval.shape) > 1 else y_trainval)):
         print(f"\n Fold {fold_idx +1}/{skf.get_n_splits()} ({model_type})")
         # Garantir reprodutibilidade dentro de cada fold
@@ -121,19 +123,19 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
             num_dense = trial.suggest_int("num_dense_layers", 1, 3)
             dense_neurons = trial.suggest_int('dense_neurons', 60, 320, log=True)
             model = CNN1DNet(input_shape_dict["CNN1D"], filter_size, kernel_size, num_layers, num_dense, dense_neurons, dropout, num_labels)
-            batch_size = 32
+            batch_size = 64
 
         elif model_type == "MLP":
             num_layers = trial.suggest_int("num_layers", 1, 5)
             dense_neurons = trial.suggest_int('dense_neurons', 20, 4000, log=True)
             model = MLPNet(input_dim=input_shape_dict["MLP"], num_layers=num_layers, dense_neurons=dense_neurons, dropout=dropout, number_of_labels=num_labels)
-            batch_size = 64
+            batch_size = 128
 
         elif model_type == "LSTM":
             hidden_dim = trial.suggest_int("hidden_dim", 32, 512, log=True)
             num_layers = trial.suggest_int("num_layers", 1, 3)
             model = LSTMNet(input_dim=input_shape_dict["LSTM"][1], hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout, number_of_labels=num_labels)
-            batch_size = 32
+            batch_size = 64
 
         model.to(device, non_blocking=True)
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -144,7 +146,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_train, dtype=torch.float32),
                 torch.tensor(np.argmax(y_train, axis=1) if len(y_train.shape) > 1 else y_train, dtype=torch.long)
             ),
-            batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2
+            batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=6
         )
 
         val_loader = torch.utils.data.DataLoader(
@@ -152,7 +154,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_val, dtype=torch.float32),
                 torch.tensor(np.argmax(y_val, axis=1) if len(y_val.shape) > 1 else y_val, dtype=torch.long)
             ),
-            batch_size=batch_size, pin_memory=True, num_workers=2
+            batch_size=batch_size, pin_memory=True, num_workers=6
         )
 
         y_pred, y_true, val_losses, train_losses = train(
@@ -245,7 +247,7 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels,
         num_labels,
         device,
         restrict_model_type
-    ), n_trials=30, n_jobs=1) # n_trials = 15
+    ), n_trials=20, n_jobs=1) # n_trials = 30 original
 
     print("Melhor MCC:", study.best_value)
     print("Melhores hiperparâmetros:", study.best_params)
@@ -389,7 +391,6 @@ def record_metrics(metrics, tp, tn, fp, fn, i, output_dir):
         })
 
 def plot_loss_curve(train_losses, val_losses, output_dir, model_idx):
-    import matplotlib.pyplot as plt
     epochs = range(1, len(train_losses) + 1)
     plt.figure()
     plt.plot(epochs, train_losses, label="Train Loss")
