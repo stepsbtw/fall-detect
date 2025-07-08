@@ -145,7 +145,10 @@ def main():
     else:
         input_shape = np.prod(scenarios[scenario][1])
 
-    for i in range(1, 11):
+    for i in range(1, 21): #range(1,11)
+        torch.manual_seed(42 + i)
+        np.random.seed(42 + i)
+        random.seed(42 + i)
         print(f"\n--- Modelo {i} ---\n")
         model_dir = os.path.join(base_out, f"model_{i}")
         os.makedirs(model_dir, exist_ok=True)

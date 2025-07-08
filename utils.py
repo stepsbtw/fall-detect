@@ -157,7 +157,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
 
         y_pred, y_true, val_losses, train_losses = train(
             model, train_loader, val_loader, optimizer, criterion, device,
-            epochs=25, early_stopping=False, patience=None
+            epochs=25, early_stopping=True, patience=5
         )
 
         all_train_losses.append(train_losses)
@@ -245,7 +245,7 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels,
         num_labels,
         device,
         restrict_model_type
-    ), n_trials=15, n_jobs=1)
+    ), n_trials=30, n_jobs=1) # n_trials = 15
 
     print("Melhor MCC:", study.best_value)
     print("Melhores hiperparâmetros:", study.best_params)
