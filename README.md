@@ -4,7 +4,7 @@ Adaptação para o PyTorch do trabalho original : https://AILAB-CEFET-RJ/falldet
 
 Baseado no artigo - A Machine Learning Approach to Automatic Fall Detection of Soldiers: https://arxiv.org/abs/2501.15655v2
 
-Além da adaptação, o modelo LSTM foi implementado e testado junto aos demais.
+Além da adaptação, K-Fold Cross Validation e o modelo LSTM foi implementado e testado junto aos demais.
 
 Os sensores no trabalho original não são combinados (left, chest, right), por motivos de "escolher o melhor".
 
@@ -105,9 +105,12 @@ output/
 ## Observações
 
 - A otimização via Optuna é repetida por **30 experimentos (trials)**
-- O treinamento final é repetido **20 vezes** para garantir robustez
+- O treinamento final é repetido **20 vezes** para garantir robustez ( ja feito no trabalho original )
 - **Early Stopping** está implementado com patience = 5
 - Utiliza **Optuna Median Pruner** para interromper execuções com baixo desempenho
+- K-Fold por enquanto com 5 Folds (Datasets são pequenos, 1040*6(chest) e 408*6(left).
+- Batch Sizes pra CNN e LSTM = 32, MLP = 64 (adaptável)
+- Suporte a paralelismo com PyTorch se necessário.
 
 ---
 
