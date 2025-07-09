@@ -11,6 +11,10 @@ from utils import train, save_results, run_optuna, plot_loss_curve
 from neural_networks import CNN1DNet, MLPNet, LSTMNet
 import pandas as pd
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
 def main():
 
     # ----------------------------- #
@@ -63,7 +67,7 @@ def main():
     root_dir = os.path.dirname(__file__)
     data_path = os.path.join(root_dir, "labels_and_data", "data", position)
     label_path = os.path.join(root_dir, "labels_and_data", "labels", position)
-    base_out = os.path.join(root_dir, "output", "optuna", model_type_arg, position, scenario, label_type)
+    base_out = os.path.join(root_dir, "output", model_type_arg, position, scenario, label_type)
     os.makedirs(base_out, exist_ok=True)
 
     # Tamanhos dos vetores
@@ -174,7 +178,7 @@ def main():
                 dropout=best_params["dropout"],
                 number_of_labels=num_labels
             )
-            batch_size = 128
+            batch_size = 32
         elif model_type == "LSTM":
             model = LSTMNet(
                 input_dim=input_shape[1],
@@ -191,13 +195,15 @@ def main():
         train_loader = DataLoader(TensorDataset(
             torch.tensor(X_trainval, dtype=torch.float32),
             torch.tensor(y_trainval, dtype=torch.long)
-        ), batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=6)
+        ), batch_size=batch_size, shuffle=True, pin_memory=True, #num_workers=6
+        )
 
         # corretamente usando teste
         test_loader = DataLoader(TensorDataset(
             torch.tensor(X_test, dtype=torch.float32),
             torch.tensor(y_test, dtype=torch.long)
-        ), batch_size=batch_size, pin_memory=True, num_workers=6)
+        ), batch_size=batch_size, pin_memory=True, #num_workers=6
+        )
 
         optimizer = torch.optim.Adam(model.parameters(), lr=best_params["lr"])
         criterion = nn.CrossEntropyLoss()
@@ -223,6 +229,52 @@ def main():
 
         with open(os.path.join(model_dir, "used_hyperparameters.json"), "w") as f:
             json.dump(best_params, f, indent=4)
+
+
+    # Criar lista para armazenar métricas
+    all_metrics = []
+
+    # Caminho base onde estão salvos os modelos
+    for i in range(1, 21):
+        metrics_path = os.path.join(base_out, f"model_{i}", f"metrics_model_{i}.csv")
+        if os.path.exists(metrics_path):
+            df = pd.read_csv(metrics_path)
+            all_metrics.append(df.iloc[0])
+
+    # Gerar DataFrame com todas as métricas
+    metrics_df = pd.DataFrame(all_metrics)
+
+    # Salvar todas as métricas em CSV
+    all_metrics_path = os.path.join(base_out, "all_metrics.csv")
+    metrics_df.to_csv(all_metrics_path, index=False)
+
+    # Calcular média e desvio padrão
+    summary = metrics_df.describe().loc[["mean", "std"]]
+
+    # Salvar resumo estatístico
+    summary_path = os.path.join(base_out, "summary_metrics.csv")
+    summary.to_csv(summary_path)
+
+    # Salvar boxplot de distribuição das principais métricas
+    plt.figure(figsize=(10, 6))
+    metricas_plot = ["MCC", "Accuracy", "Precision", "Sensitivity", "Specificity"]
+    sns.boxplot(data=metrics_df[metricas_plot])
+    plt.title("Distribuição das Métricas dos 20 Modelos")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(base_out, "metrics_boxplot.png"))
+    plt.close()
+
+    import shutil
+
+    best_dir = os.path.join(base_out, "best_models")
+    os.makedirs(best_dir, exist_ok=True)
+
+    for i in range(1, 21):
+        src = os.path.join(base_out, f"model_{i}", f"model_{i}.pt")
+        dst = os.path.join(best_dir, f"model_{i}.pt")
+        shutil.copyfile(src, dst)
+
 
 if __name__ == "__main__":
     main()

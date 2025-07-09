@@ -87,13 +87,10 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
 
 def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_labels, device, restrict_model_type=None):
     print(f"\nIniciando Trial #{trial.number}\n")
-    if restrict_model_type:
-        model_type = restrict_model_type
-    else:
-        model_type = trial.suggest_categorical("model_type", ["CNN1D", "MLP", "LSTM"])
 
+    model_type = restrict_model_type if restrict_model_type else trial.suggest_categorical("model_type", ["CNN1D", "MLP", "LSTM"])
     dropout = trial.suggest_float('dropout', 0.1, 0.5, step=0.1)
-    learning_rate = trial.suggest_categorical('learning_rate', [0.0001, 0.0003, 0.0006, 0.001, 0.003, 0.006, 0.01])
+    learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
     decision_threshold = trial.suggest_float('decision_threshold', 0.5, 0.9, step=0.1)
 
     mcc_scores = []
@@ -101,43 +98,48 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
     all_val_losses = []
 
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
     for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_trainval, y_trainval.argmax(axis=1) if len(y_trainval.shape) > 1 else y_trainval)):
-        print(f"\n Fold {fold_idx +1}/{skf.get_n_splits()} ({model_type})")
-        # Garantir reprodutibilidade dentro de cada fold
+        print(f"\n Fold {fold_idx + 1}/{skf.get_n_splits()} ({model_type})")
+
         torch.manual_seed(42 + fold_idx)
         torch.cuda.manual_seed_all(42 + fold_idx)
         np.random.seed(42 + fold_idx)
         random.seed(42 + fold_idx)
-        
+
         X_train, X_val = X_trainval[train_idx], X_trainval[val_idx]
         y_train, y_val = y_trainval[train_idx], y_trainval[val_idx]
 
+        batch_size = 32
+
         if model_type == "CNN1D":
-            filter_size = trial.suggest_int('filter_size', 8, 600, log=True)
-            kernel_size = trial.suggest_int("kernel_size", 2, 6)
-            num_layers = trial.suggest_int('num_layers', 2, 4)
+            filter_size = trial.suggest_int("filter_size", 16, 128, log=True)
+            kernel_size = trial.suggest_int("kernel_size", 3, 7)
+            num_layers = trial.suggest_int("num_layers", 2, 4)
+            num_dense = trial.suggest_int("num_dense_layers", 1, 2)
+            dense_neurons = trial.suggest_int("dense_neurons", 64, 512, log=True)
+
+            # Prune se convolução reduz demais
             max_seq_len = input_shape_dict["CNN1D"][0]
             reduced_seq_len = max_seq_len // (2 ** num_layers)
-            if reduced_seq_len <= 0 or reduced_seq_len <= kernel_size:
+            if reduced_seq_len <= kernel_size:
                 raise optuna.exceptions.TrialPruned()
-            num_dense = trial.suggest_int("num_dense_layers", 1, 3)
-            dense_neurons = trial.suggest_int('dense_neurons', 60, 320, log=True)
+    
             model = CNN1DNet(input_shape_dict["CNN1D"], filter_size, kernel_size, num_layers, num_dense, dense_neurons, dropout, num_labels)
-            batch_size = 64
 
         elif model_type == "MLP":
-            num_layers = trial.suggest_int("num_layers", 1, 5)
-            dense_neurons = trial.suggest_int('dense_neurons', 20, 4000, log=True)
+            num_layers = trial.suggest_int("num_layers", 1, 4)
+    
+            max_dense = min(1024, max(64, input_shape_dict["MLP"] // 4))  # garante que max_dense >= 64
+            dense_neurons = trial.suggest_int("dense_neurons", 64, max_dense, log=True)
             model = MLPNet(input_dim=input_shape_dict["MLP"], num_layers=num_layers, dense_neurons=dense_neurons, dropout=dropout, number_of_labels=num_labels)
-            batch_size = len(y_train)//30 # leandro fez assim
 
         elif model_type == "LSTM":
-            hidden_dim = trial.suggest_int("hidden_dim", 32, 512, log=True)
+            hidden_dim = trial.suggest_int("hidden_dim", 64, 256, log=True)
             num_layers = trial.suggest_int("num_layers", 1, 3)
             model = LSTMNet(input_dim=input_shape_dict["LSTM"][1], hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout, number_of_labels=num_labels)
-            batch_size = 64
 
-        model.to(device, non_blocking=True)
+        model.to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         criterion = torch.nn.CrossEntropyLoss()
 
@@ -146,7 +148,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_train, dtype=torch.float32),
                 torch.tensor(np.argmax(y_train, axis=1) if len(y_train.shape) > 1 else y_train, dtype=torch.long)
             ),
-            batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=6
+            batch_size=batch_size, shuffle=True, pin_memory=True, #num_workers=6
         )
 
         val_loader = torch.utils.data.DataLoader(
@@ -154,7 +156,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_val, dtype=torch.float32),
                 torch.tensor(np.argmax(y_val, axis=1) if len(y_val.shape) > 1 else y_val, dtype=torch.long)
             ),
-            batch_size=batch_size, pin_memory=True, num_workers=6
+            batch_size=batch_size, pin_memory=True, #num_workers=6
         )
 
         y_pred, y_true, val_losses, train_losses = train(
@@ -165,12 +167,28 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
         all_train_losses.append(train_losses)
         all_val_losses.append(val_losses)
 
+        fold_dir = os.path.join(output_dir, f"trial_{trial.number}")
+        os.makedirs(fold_dir, exist_ok=True)
+
+        plot_loss_curve(train_losses, val_losses, fold_dir, f"{trial.number}fold{fold_idx + 1}")
+
+        save_results(
+            model=model,
+            val_loader=val_loader,
+            y_val_onehot=y_val,
+            number_of_labels=num_labels,
+            i=f"{trial.number}fold{fold_idx + 1}",
+            decision_threshold=decision_threshold,
+            output_dir=fold_dir,
+            device=device
+        )
+
         if num_labels == 2:
             y_probs = []
             model.eval()
             with torch.no_grad():
                 for xb, _ in val_loader:
-                    xb = xb.to(device, non_blocking=True)
+                    xb = xb.to(device)
                     out = model(xb)
                     probs = F.softmax(out, dim=1)[:, 1].cpu().numpy()
                     y_probs.extend(probs)
@@ -183,40 +201,52 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
 
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
-        
+
         del model
         del optimizer
         torch.cuda.empty_cache()
-        
-        # --- Salvar curva de perda por fold ---
-        fold_dir = os.path.join(output_dir, f"trial_{trial.number}")
-        os.makedirs(fold_dir, exist_ok=True)
-        csv_fold_path = os.path.join(fold_dir, f"losses_fold_{fold_idx + 1}.csv")
-        with open(csv_fold_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["epoch", "train_loss", "val_loss"])
-            for epoch in range(len(train_losses)):
-                writer.writerow([epoch + 1, train_losses[epoch], val_losses[epoch]])
 
-        # --- Plotar curva de perda do fold individual ---
-        plt.figure()
-        plt.plot(range(1, len(train_losses) + 1), train_losses, label="Train Loss")
-        plt.plot(range(1, len(val_losses) + 1), val_losses, label="Validation Loss")
-        plt.xlabel("Epoch")
-        plt.ylabel("Loss")
-        plt.title(f"Loss Curve - Trial {trial.number} - Fold {fold_idx + 1}")
-        plt.legend()
-        plt.grid()
-        plt.savefig(os.path.join(fold_dir, f"loss_curve_fold_{fold_idx + 1}.png"))
-        plt.close()
-
-
-    # Média do MCC entre folds
     mean_mcc = np.mean(mcc_scores)
-
     print(f"Trial {trial.number} - Média MCC: {mean_mcc:.4f}")
 
-    return np.mean(mcc_scores)
+    trial_dir = os.path.join(output_dir, f"trial_{trial.number}")
+    os.makedirs(trial_dir, exist_ok=True)
+
+    summary = {
+        "trial_number": trial.number,
+        "model_type": model_type,
+        "params": {
+            "dropout": dropout,
+            "learning_rate": learning_rate,
+            "decision_threshold": decision_threshold
+        },
+        "mean_mcc": float(mean_mcc),
+        "mcc_scores": mcc_scores
+    }
+
+    if model_type == "CNN1D":
+        summary["params"].update({
+            "filter_size": filter_size,
+            "kernel_size": kernel_size,
+            "num_layers": num_layers,
+            "num_dense_layers": num_dense,
+            "dense_neurons": dense_neurons
+        })
+    elif model_type == "MLP":
+        summary["params"].update({
+            "num_layers": num_layers,
+            "dense_neurons": dense_neurons
+        })
+    elif model_type == "LSTM":
+        summary["params"].update({
+            "hidden_dim": hidden_dim,
+            "num_layers": num_layers
+        })
+
+    with open(os.path.join(trial_dir, "trial_summary.json"), "w") as f:
+        json.dump(summary, f, indent=4)
+
+    return mean_mcc
 
 def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels, device, study_name, restrict_model_type=None):
 
