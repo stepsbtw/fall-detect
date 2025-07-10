@@ -17,7 +17,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import f1_score
 import json
 
-def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=25, early_stopping=False, patience=5):
+def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=25, early_stopping=False, patience=5, scaler=None):
     model.to(device, non_blocking=True)
     best_val_loss = float('inf')
     patience_counter = 0
@@ -33,10 +33,21 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
         for xb, yb in train_loader:
             xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
             optimizer.zero_grad()
-            out = model(xb)
-            loss = criterion(out, yb)
-            loss.backward()
-            optimizer.step()
+            
+            # Mixed precision training se scaler disponível
+            if scaler is not None:
+                with torch.amp.autocast('cuda'):
+                    out = model(xb)
+                    loss = criterion(out, yb)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                out = model(xb)
+                loss = criterion(out, yb)
+                loss.backward()
+                optimizer.step()
+            
             train_losses.append(loss.item())
 
         avg_train_loss = np.mean(train_losses)
@@ -48,8 +59,14 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
-                out = model(xb)
-                loss = criterion(out, yb)
+                # Mixed precision inference se scaler disponível
+                if scaler is not None:
+                    with torch.amp.autocast('cuda'):
+                        out = model(xb)
+                        loss = criterion(out, yb)
+                else:
+                    out = model(xb)
+                    loss = criterion(out, yb)
                 val_losses.append(loss.item())
                 y_pred.extend(torch.argmax(out, dim=1).cpu().numpy())
                 y_true.extend(yb.cpu().numpy())

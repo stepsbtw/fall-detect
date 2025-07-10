@@ -227,10 +227,14 @@ def main():
         optimizer = torch.optim.Adam(model.parameters(), lr=best_params["lr"])
         criterion = nn.CrossEntropyLoss()
 
+        # Configurar mixed precision se disponível
+        scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
+        
         y_pred, y_true, val_losses, train_losses = train(
             model, train_loader, test_loader,
             optimizer, criterion, device,
-            epochs=25, early_stopping=True, patience=5
+            epochs=25, early_stopping=True, patience=5,
+            scaler=scaler
         )
 
         plot_loss_curve(train_losses, val_losses, model_dir, i)
