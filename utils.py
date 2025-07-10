@@ -140,6 +140,15 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
             model = LSTMNet(input_dim=input_shape_dict["LSTM"][1], hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout, number_of_labels=num_labels)
 
         model.to(device)
+        
+        # Usar múltiplas GPUs se disponível
+        if torch.cuda.device_count() > 1:
+            print(f"Usando {torch.cuda.device_count()} GPUs com DataParallel")
+            model = torch.nn.DataParallel(model)
+            # Ajustar batch size para múltiplas GPUs
+            batch_size = batch_size * torch.cuda.device_count()
+            print(f"Batch size ajustado para {batch_size} (batch_size * num_gpus)")
+        
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         criterion = torch.nn.CrossEntropyLoss()
 
@@ -148,7 +157,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_train, dtype=torch.float32),
                 torch.tensor(np.argmax(y_train, axis=1) if len(y_train.shape) > 1 else y_train, dtype=torch.long)
             ),
-            batch_size=batch_size, shuffle=True, pin_memory=True, #num_workers=6
+            batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=8
         )
 
         val_loader = torch.utils.data.DataLoader(
@@ -156,7 +165,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_val, dtype=torch.float32),
                 torch.tensor(np.argmax(y_val, axis=1) if len(y_val.shape) > 1 else y_val, dtype=torch.long)
             ),
-            batch_size=batch_size, pin_memory=True, #num_workers=6
+            batch_size=batch_size, pin_memory=True, num_workers=8
         )
 
         y_pred, y_true, val_losses, train_losses = train(

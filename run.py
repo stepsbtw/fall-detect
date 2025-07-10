@@ -24,8 +24,19 @@ def main():
     print("Usando dispositivo:", device)
     if torch.cuda.is_available():
         print("GPU:", torch.cuda.get_device_name(0))
+        print("Número de GPUs:", torch.cuda.device_count())
+        
+        # Configurar para usar múltiplas GPUs
+        if torch.cuda.device_count() > 1:
+            print("Configurando para usar múltiplas GPUs...")
+            print(f"GPUs disponíveis: {torch.cuda.device_count()}")
+            for i in range(torch.cuda.device_count()):
+                print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+    
     torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True # gotta go fast
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     # ----------------------------- #
     #   Fixar Seeds (Reprodutível)  #
@@ -191,18 +202,26 @@ def main():
 
         model.to(device, non_blocking=True)
 
+        # Usar múltiplas GPUs se disponível
+        if torch.cuda.device_count() > 1:
+            print(f"Usando {torch.cuda.device_count()} GPUs com DataParallel")
+            model = torch.nn.DataParallel(model)
+            # Ajustar batch size para múltiplas GPUs
+            batch_size = batch_size * torch.cuda.device_count()
+            print(f"Batch size ajustado para {batch_size} (batch_size * num_gpus)")
+
         # treino final em val+train
         train_loader = DataLoader(TensorDataset(
             torch.tensor(X_trainval, dtype=torch.float32),
             torch.tensor(y_trainval, dtype=torch.long)
-        ), batch_size=batch_size, shuffle=True, pin_memory=True, #num_workers=6
+        ), batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=8
         )
 
         # corretamente usando teste
         test_loader = DataLoader(TensorDataset(
             torch.tensor(X_test, dtype=torch.float32),
             torch.tensor(y_test, dtype=torch.long)
-        ), batch_size=batch_size, pin_memory=True, #num_workers=6
+        ), batch_size=batch_size, pin_memory=True, num_workers=8
         )
 
         optimizer = torch.optim.Adam(model.parameters(), lr=best_params["lr"])
