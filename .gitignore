@@ -5,7 +5,5 @@
 /labels_and_data
 
 *.pt
-*.png
-*.db
 
 builders/__pycache__
