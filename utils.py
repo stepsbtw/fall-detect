@@ -254,7 +254,8 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
             i=f"{trial.number}fold{fold_idx + 1}",
             decision_threshold=decision_threshold,
             output_dir=fold_dir,
-            device=device
+            device=device,
+            save_model=Config.TRAINING_CONFIG.get('save_fold_models', True)
         )
 
         # Calcular MCC
@@ -386,15 +387,16 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels,
 # SALVAMENTO E ANÁLISE DE RESULTADOS
 # =============================================================================
 
-def save_results(model, val_loader, y_val_onehot, number_of_labels, i, decision_threshold, output_dir, device):
+def save_results(model, val_loader, y_val_onehot, number_of_labels, i, decision_threshold, output_dir, device, save_model=True):
     """
     Salva resultados completos do modelo
     """
     os.makedirs(output_dir, exist_ok=True)
 
     # 1. Salvar modelo
-    model_path = os.path.join(output_dir, f"model_{i}.pt")
-    torch.save(model.state_dict(), model_path)
+    if save_model:
+        model_path = os.path.join(output_dir, f"model_{i}.pt")
+        torch.save(model.state_dict(), model_path)
 
     # 2. Inferência
     model.eval()

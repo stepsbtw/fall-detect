@@ -78,7 +78,8 @@ class Config:
         'batch_size': 32,
         'num_workers': 8,
         'pin_memory': True,
-        'shuffle': True
+        'shuffle': True,
+        'save_fold_models': False
     }
     
     # ----------------------------- #
