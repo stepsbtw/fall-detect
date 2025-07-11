@@ -4,10 +4,8 @@
 /database
 /labels_and_data
 
-/optuna_results/*/*.model
-
-/output
-/results
-/models
+*.pt
+*.png
+*.db
 
 builders/__pycache__
