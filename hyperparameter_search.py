@@ -29,7 +29,7 @@ def main():
     parser.add_argument("-label_type", required=True, choices=["multiple_one", "multiple_two", "binary_one", "binary_two"])
     parser.add_argument("--nn", required=False, choices=["CNN1D", "MLP", "LSTM"])
     parser.add_argument("--n_trials", type=int, default=50, help="Número de trials para Optuna")
-    parser.add_argument("--timeout", type=int, default=3600, help="Timeout em segundos")
+    #parser.add_argument("--timeout", type=int, default=3600, help="Timeout em segundos")
     
     args = parser.parse_args()
     
@@ -44,7 +44,7 @@ def main():
     
     # Atualizar configurações do Optuna
     Config.OPTUNA_CONFIG['n_trials'] = args.n_trials
-    Config.OPTUNA_CONFIG['timeout'] = args.timeout
+    #Config.OPTUNA_CONFIG['timeout'] = args.timeout
     
     # ----------------------------- #
     #         Diretórios            #
@@ -94,7 +94,7 @@ def main():
     # ----------------------------- #
     print(f"\nIniciando Otimização com Optuna...")
     print(f"Número de trials: {Config.OPTUNA_CONFIG['n_trials']}")
-    print(f"Timeout: {Config.OPTUNA_CONFIG['timeout']} segundos")
+    #print(f"Timeout: {Config.OPTUNA_CONFIG['timeout']} segundos")
     
     study_name = f"{scenario}_{position}_{label_type}_{model_type_arg}" if model_type_arg else f"{scenario}_{position}_{label_type}"
     
