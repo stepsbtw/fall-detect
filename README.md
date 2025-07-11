@@ -10,26 +10,28 @@ Os sensores no trabalho original não são combinados (left, chest, right), por 
 
 Suporta 3 arquiteturas de redes neurais, **CNN1D**, **MLP** e **LSTM**, com **otimização bayesiana de hiperparâmetros via Optuna**.
 
----
+Também foi implementado o Early Stopping e o Median Pruning do Optuna.
 
 ## Estrutura do Projeto
 
 ```
-project/
-│
-├── generate_datasets.py        # Ponto de partida: cria rótulos e datasets a partir do IPQM-Fall
-├── run.py                      # Arquivo principal: CLI, carregamento, treinamento e salvamento
-├── train.py                    # Lógica de treinamento, avaliação e Optuna
-├── neural_networks.py          # Arquiteturas: CNN1D, MLP e LSTM
-├── labels_and_data/            # Dados e rótulos organizados por posição do sensor
-│   ├── data/
-│   └── labels/
-└── output/                     # Criado automaticamente: armazena modelos, métricas e gráficos
+fall-detect/
+├── config.py                 # Configurações centralizadas
+├── hyperparameter_search.py  # Script para busca de hiperparâmetros
+├── final_training.py         # Script para treinamento final + análise
+├── utils.py                  # Funções utilitárias organizadas
+├── neural_networks.py        # Arquiteturas das redes neurais
+├── requirements.txt          # Dependências
+├── my_reports.sh            # Script de automação (pipeline)
+├── extract_reports.sh       # Script para extração de relatórios
+├── generate_datasets.py     # Geração de datasets
+├── builders/                # Builders para dados
+├── labels_and_data/         # Dados e labels
+├── database/                # Base de dados
+└── README.md                # Este arquivo
 ```
 
----
-
-## Início Rápido
+## Início
 
 ### 1. Instale as dependências
 
@@ -47,91 +49,132 @@ Disponível em: https://zenodo.org/records/12760391
 python generate_datasets.py chest
 python generate_datasets.py left
 python generate_datasets.py right
-```
 
-### Alternativa 1: Execute o Treinamento com Optuna via CLI
+## Configurações
 
-```bash
-python run.py \
-  -scenario Sc1_acc_T \
-  -position chest \
-  -label_type binary_one \
-  --nn CNN1D
-```
+O arquivo `config.py` centraliza todas as configurações do projeto:
 
-#### Argumentos:
+- **Dispositivo**: Configuração automática de GPU/CPU
+- **Seeds**: Reprodutibilidade dos experimentos
+- **Diretórios**: Caminhos para dados e saídas
+- **Cenários**: Configurações dos diferentes cenários de dados
+- **Hiperparâmetros**: Ranges para otimização
+- **Treinamento**: Configurações de treinamento
 
-| Argumento                | Opções                                               | Descrição                                      |
-|--------------------------|------------------------------------------------------|------------------------------------------------|
-| `-scenario`             | Sc1_acc_T, Sc1_gyr_T, ..., Sc_4_F                    | Tipo de sinal e domínio                        |
-| `-position`             | left, chest, right                                   | Posição do sensor                              |
-| `-label_type`           | multiple_one, multiple_two, binary_one, binary_two   | Tipo de rótulo (target)                        |
-| `--nn` (opcional) | CNN1D, MLP, LSTM                        | Arquitetura da rede neural                     |
+## Modos de Execução
 
----
-
-## Alternativa 2: Use o Script Automatizado
-
-Treinará todas as possíveis combinações de modelos, cenários, rótulos e sensores, efetuará a busca de hiperparâmetros com o Optuna.
+### 1. Busca de Hiperparâmetros (`hyperparameter_search.py`)
 
 ```bash
-./extract_reports.sh
+python hyperparameter_search.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D --n_trials 20 --timeout 3600
 ```
 
-## Arquiteturas Suportadas
+### 2. Treinamento Final (`final_training.py`)
 
-- **CNN1DNet**: Convoluções 1D para sinais no tempo ou frequência  
-- **MLPNet**: Rede neural totalmente conectada para vetores planos  
-- **LSTMNet**: Modelo recorrente para sequências temporais  
-
----
-
-## Funcionalidades
-
-- Otimização de hiperparâmetros com **Optuna**
-- Treinamento e avaliação automáticos
-- Suporte a classificação **binária** (e futuramente **multiclasse**)
-- Salva:
-  - Modelos `.pt`
-  - Matrizes de confusão
-  - Relatórios de classificação
-  - Curvas ROC (para problemas binários)
-  - Métricas como MCC, acurácia, sensibilidade, especificidade e precisão
-
----
-
-## Exemplo de Saída
-
-```
-output/
-└── lstm/
-    └── chest/
-        └── Sc1_acc_T/
-            └── binary_one/
-                ├── model_1/
-                │   ├── model_1.pt
-                │   ├── confusion_matrix_model_1.png
-                │   ├── classification_report_model_1.txt
-                │   ├── roc_curve_model_1.png
-                │   └── metrics_model_1.csv
-                └── model_2/
-                    ...
+```bash
+python final_training.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D --num_models 20 --epochs 25
 ```
 
----
+**Nota:** A análise de resultados é executada automaticamente após o treinamento. Use `--no_analysis` para pular a análise.
 
-## Observações
+### 3. Pipeline Automatizado
 
-- A otimização via Optuna é repetida por **30 experimentos (trials)**
-- O treinamento final é repetido **20 vezes** para garantir robustez ( ja feito no trabalho original )
-- **Early Stopping** está implementado com patience = 5
-- Utiliza **Optuna Median Pruner** para interromper execuções com baixo desempenho
-- K-Fold por enquanto com 5 Folds (Datasets são pequenos, 1040*6(chest) e 408*6(left).
-- Batch Sizes pra CNN e LSTM = 32, MLP = 64 (adaptável)
-- Suporte a paralelismo com PyTorch se necessário.
+```bash
+# Executar pipeline completo para múltiplas configurações
+bash all.sh
+```
 
----
+## Fluxo de Trabalho Recomendado
 
-## Requisitos
+### 1. Busca de Hiperparâmetros
 
-Para minimizar conflitos, priorize utilizar o Python 3.10
+```bash
+# Executar busca para encontrar melhores hiperparâmetros
+python hyperparameter_search.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D --n_trials 50
+```
+
+### 2. Treinamento Final (com análise automática)
+
+```bash
+# Treinar modelos finais com os melhores hiperparâmetros
+# A análise de resultados é executada automaticamente
+python final_training.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D --num_models 20
+```
+
+### 3. Pipeline Automatizado
+
+```bash
+# Executar pipeline completo para múltiplas configurações
+bash my_reports.sh
+```
+
+## Cenários Disponíveis
+
+- **Sc1_acc_T**: Acelerômetro magnitude, domínio temporal
+- **Sc1_gyr_T**: Giroscópio magnitude, domínio temporal
+- **Sc1_acc_F**: Acelerômetro magnitude, domínio frequência
+- **Sc1_gyr_F**: Giroscópio magnitude, domínio frequência
+- **Sc_2_acc_T**: Acelerômetro 3 eixos, domínio temporal
+- **Sc_2_gyr_T**: Giroscópio 3 eixos, domínio temporal
+- **Sc_2_acc_F**: Acelerômetro 3 eixos, domínio frequência
+- **Sc_2_gyr_F**: Giroscópio 3 eixos, domínio frequência
+- **Sc_3_T**: Acelerômetro + Giroscópio magnitude, domínio temporal
+- **Sc_3_F**: Acelerômetro + Giroscópio magnitude, domínio frequência
+- **Sc_4_T**: Acelerômetro + Giroscópio 3 eixos, domínio temporal
+- **Sc_4_F**: Acelerômetro + Giroscópio 3 eixos, domínio frequência
+
+## Posições
+
+- **chest**: Dados do peito (1020 samples)
+- **left**: Dados do lado esquerdo (450 samples)
+- **right**: Dados do lado direito (450 samples)
+
+## Tipos de Labels
+
+- **binary_one**: Classificação binária (2 classes)
+- **binary_two**: Classificação binária alternativa (2 classes)
+- **multiple_one**: Classificação múltipla (37 classes)
+- **multiple_two**: Classificação múltipla alternativa (26 classes)
+
+## Modelos de Rede Neural
+
+- **CNN1D**: Rede neural convolucional 1D
+- **MLP**: Multi-layer perceptron
+- **LSTM**: Long short-term memory
+
+## Saídas Geradas
+
+### Busca de Hiperparâmetros
+- `best_hyperparameters.json`: Melhores hiperparâmetros encontrados
+- `test_data.npz`: Dados de teste salvos
+- `optuna_trials.csv`: Resultados de todos os trials
+- `param_importance.png`: Importância dos hiperparâmetros
+- Diretórios `trial_X/`: Resultados de cada trial do Optuna
+
+### Treinamento Final + Análise
+- Diretórios `model_X/`: Resultados de cada modelo treinado
+  - `model_X.pt`: Modelo salvo
+  - `metrics_model_X.csv`: Métricas do modelo
+  - `loss_curve_model_X.png`: Curva de loss
+  - `confusion_matrix_model_X.png`: Matriz de confusão
+  - `roc_curve_model_X.png`: Curva ROC
+  - `classification_report_model_X.txt`: Relatório de classificação
+- **Análise automática:**
+  - `all_metrics.csv`: Métricas de todos os modelos
+  - `summary_metrics.csv`: Estatísticas resumidas
+  - `metrics_boxplot.png`: Boxplot das métricas
+  - `mcc_histogram.png`: Histograma do MCC
+  - `mcc_vs_accuracy.png`: Scatter plot MCC vs Accuracy
+  - `correlation_heatmap.png`: Matriz de correlação
+  - `best_models/`: Diretório com cópias dos melhores modelos
+
+## Configurações Avançadas
+
+### Modificar Configurações
+
+Edite o arquivo `config.py` para alterar:
+
+- Número de trials do Optuna
+- Configurações de treinamento
+- Ranges de hiperparâmetros
+- Configurações de GPU

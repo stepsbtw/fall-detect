@@ -1,3 +1,14 @@
+"""
+Utilitários para detecção de quedas
+
+Funções organizadas por categoria:
+- Treinamento e validação
+- Otimização com Optuna
+- Salvamento e análise
+- Visualizações
+- Métricas
+"""
+
 import torch
 from sklearn.metrics import matthews_corrcoef
 import torch.nn.functional as F
@@ -16,8 +27,16 @@ import random
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import f1_score
 import json
+import seaborn as sns
 
-def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=25, early_stopping=False, patience=5, scaler=None):
+# =============================================================================
+# TREINAMENTO E VALIDAÇÃO
+# =============================================================================
+
+def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=25, early_stopping=False, patience=5, scaler=None, trial=None):
+    """
+    Treina modelo com early stopping, mixed precision e pruning opcional
+    """
     model.to(device, non_blocking=True)
     best_val_loss = float('inf')
     patience_counter = 0
@@ -74,6 +93,13 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
         avg_val_loss = np.mean(val_losses)
         avg_val_losses.append(avg_val_loss)
 
+        # Pruning intermediário (se trial fornecido)
+        if trial is not None:
+            trial.report(avg_val_loss, epoch)
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
+
+        # Early stopping
         if early_stopping:
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
@@ -84,8 +110,10 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
                 if patience_counter >= patience:
                     print(f"Early stopping at epoch {epoch + 1}")
                     break
+    
     torch.cuda.empty_cache()
 
+    # Restaurar melhor modelo se early stopping foi usado
     if early_stopping and best_model_state is not None:
         model.load_state_dict(best_model_state)
         # Reavaliar após restaurar melhores pesos
@@ -102,9 +130,17 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
 
     return y_pred, y_true, avg_val_losses, avg_train_losses
 
+# =============================================================================
+# OTIMIZAÇÃO COM OPTUNA
+# =============================================================================
+
 def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_labels, device, restrict_model_type=None):
+    """
+    Função objetivo para otimização com Optuna
+    """
     print(f"\nIniciando Trial #{trial.number}\n")
 
+    # Sugerir hiperparâmetros
     model_type = restrict_model_type if restrict_model_type else trial.suggest_categorical("model_type", ["CNN1D", "MLP", "LSTM"])
     dropout = trial.suggest_float('dropout', 0.1, 0.5, step=0.1)
     learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
@@ -114,11 +150,13 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
     all_train_losses = []
     all_val_losses = []
 
+    # Cross-validation
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
     for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_trainval, y_trainval.argmax(axis=1) if len(y_trainval.shape) > 1 else y_trainval)):
         print(f"\n Fold {fold_idx + 1}/{skf.get_n_splits()} ({model_type})")
 
+        # Definir seeds para reprodutibilidade
         torch.manual_seed(42 + fold_idx)
         torch.cuda.manual_seed_all(42 + fold_idx)
         np.random.seed(42 + fold_idx)
@@ -129,6 +167,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
 
         batch_size = 32
 
+        # Criar modelo baseado no tipo
         if model_type == "CNN1D":
             filter_size = trial.suggest_int("filter_size", 16, 128, log=True)
             kernel_size = trial.suggest_int("kernel_size", 3, 7)
@@ -169,6 +208,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         criterion = torch.nn.CrossEntropyLoss()
 
+        # Preparar data loaders
         train_loader = torch.utils.data.DataLoader(
             torch.utils.data.TensorDataset(
                 torch.tensor(X_train, dtype=torch.float32),
@@ -185,14 +225,16 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
             batch_size=batch_size, pin_memory=True, num_workers=8
         )
 
+        # Treinar modelo com pruning intermediário
         y_pred, y_true, val_losses, train_losses = train(
             model, train_loader, val_loader, optimizer, criterion, device,
-            epochs=25, early_stopping=True, patience=5
+            epochs=25, early_stopping=True, patience=5, trial=trial
         )
 
         all_train_losses.append(train_losses)
         all_val_losses.append(val_losses)
 
+        # Salvar resultados do fold
         fold_dir = os.path.join(output_dir, f"trial_{trial.number}")
         os.makedirs(fold_dir, exist_ok=True)
 
@@ -209,6 +251,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
             device=device
         )
 
+        # Calcular MCC
         if num_labels == 2:
             y_probs = []
             model.eval()
@@ -225,6 +268,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
 
         mcc_scores.append(mcc)
 
+        # Pruning check após cada fold
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
 
@@ -235,6 +279,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
     mean_mcc = np.mean(mcc_scores)
     print(f"Trial {trial.number} - Média MCC: {mean_mcc:.4f}")
 
+    # Salvar resumo do trial
     trial_dir = os.path.join(output_dir, f"trial_{trial.number}")
     os.makedirs(trial_dir, exist_ok=True)
 
@@ -275,7 +320,9 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
     return mean_mcc
 
 def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels, device, study_name, restrict_model_type=None):
-
+    """
+    Executa otimização com Optuna
+    """
     db_path = os.path.join(output_dir, "optuna_study.db")
     storage_url = f"sqlite:///{db_path}"
 
@@ -288,7 +335,11 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels,
             direction="maximize",
             study_name=study_name,
             storage=storage_url,
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5),
+            pruner=optuna.pruners.MedianPruner(
+                n_startup_trials=5,
+                n_warmup_steps=5,
+                interval_steps=1
+            ),
             load_if_exists=True
         )
         print(f"Novo estudo criado e salvo em: {db_path}")
@@ -325,7 +376,14 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels,
 
     return study
 
+# =============================================================================
+# SALVAMENTO E ANÁLISE DE RESULTADOS
+# =============================================================================
+
 def save_results(model, val_loader, y_val_onehot, number_of_labels, i, decision_threshold, output_dir, device):
+    """
+    Salva resultados completos do modelo
+    """
     os.makedirs(output_dir, exist_ok=True)
 
     # 1. Salvar modelo
@@ -372,46 +430,78 @@ def save_results(model, val_loader, y_val_onehot, number_of_labels, i, decision_
             f.write(f"MCC: {mcc:.4f}\n")
             f.write(f"F1-score (macro): {f1:.4f}\n")
 
+# =============================================================================
+# VISUALIZAÇÕES
+# =============================================================================
+
 def plot_confusion_matrix(cm, number_of_labels, output_dir, i):
-    plt.imshow(cm, cmap=plt.cm.Blues)
-    plt.title('Confusion Matrix')
-    plt.colorbar()
-    ticks = np.arange(number_of_labels)
-    plt.xticks(ticks)
-    plt.yticks(ticks)
-
-    thresh = cm.max() / 2.
-    for r, c in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
-        plt.text(c, r, format(cm[r, c], 'd'),
-                 ha="center", color="white" if cm[r, c] > thresh else "black")
-
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
+    """
+    Plota matriz de confusão
+    """
+    plt.figure(figsize=(8, 6))
+    if number_of_labels == 2:
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                    xticklabels=['Não Queda', 'Queda'], 
+                    yticklabels=['Não Queda', 'Queda'])
+        plt.title(f'Matriz de Confusão - Modelo {i}')
+        plt.ylabel('Valor Real')
+        plt.xlabel('Valor Predito')
+    else:
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+        plt.title(f'Matriz de Confusão - Modelo {i}')
+        plt.ylabel('Valor Real')
+        plt.xlabel('Valor Predito')
+    
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"confusion_matrix_model_{i}.png"))
+    plt.savefig(os.path.join(output_dir, f'confusion_matrix_model_{i}.png'), dpi=300, bbox_inches='tight')
     plt.close()
-
-def save_classification_report(y_pred, y_true, number_of_labels, output_dir, i):
-    report = classification_report(y_true, y_pred, target_names=[str(x) for x in range(number_of_labels)])
-    with open(os.path.join(output_dir, f"classification_report_model_{i}.txt"), "w") as f:
-        f.write(report)
 
 def plot_roc_curve(y_score, y_true, output_dir, i):
+    """
+    Plota curva ROC
+    """
     fpr, tpr, _ = roc_curve(y_true, y_score)
     auc = roc_auc_score(y_true, y_score)
-
-    plt.figure()
-    plt.plot(fpr, tpr, label=f'ROC (AUC = {auc:.2f})')
-    plt.plot([0, 1], [0, 1], 'k--')
-    plt.xlabel("FPR")
-    plt.ylabel("TPR")
-    plt.title("ROC Curve")
-    plt.legend()
-    plt.grid()
-    plt.savefig(os.path.join(output_dir, f"roc_curve_model_{i}.png"))
+    
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {auc:.2f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(f'ROC Curve - Modelo {i}')
+    plt.legend(loc="lower right")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'roc_curve_model_{i}.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
+def plot_loss_curve(train_losses, val_losses, output_dir, model_idx):
+    """
+    Plota curva de loss
+    """
+    plt.figure(figsize=(10, 6))
+    epochs = range(1, len(train_losses) + 1)
+    plt.plot(epochs, train_losses, 'b-', label='Training Loss')
+    plt.plot(epochs, val_losses, 'r-', label='Validation Loss')
+    plt.title(f'Training and Validation Loss - Modelo {model_idx}')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'loss_curve_model_{model_idx}.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+# =============================================================================
+# MÉTRICAS E AVALIAÇÃO
+# =============================================================================
+
 def calculate_metrics(tp, tn, fp, fn, y_true, y_pred):
+    """
+    Calcula métricas de avaliação
+    """
     mcc = matthews_corrcoef(y_true, y_pred)
     sensitivity = tp / (tp + fn + 1e-10)
     specificity = tn / (tn + fp + 1e-10)
@@ -427,6 +517,9 @@ def calculate_metrics(tp, tn, fp, fn, y_true, y_pred):
     }
 
 def record_metrics(metrics, tp, tn, fp, fn, i, output_dir):
+    """
+    Salva métricas em CSV
+    """
     path = os.path.join(output_dir, f"metrics_model_{i}.csv")
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=[
@@ -446,15 +539,11 @@ def record_metrics(metrics, tp, tn, fp, fn, i, output_dir):
             "fn": fn
         })
 
-def plot_loss_curve(train_losses, val_losses, output_dir, model_idx):
-    epochs = range(1, len(train_losses) + 1)
-    plt.figure()
-    plt.plot(epochs, train_losses, label="Train Loss")
-    plt.plot(epochs, val_losses, label="Validation Loss")
-    plt.xlabel("Epochs")
-    plt.ylabel("Loss")
-    plt.title(f"Loss Curve - Model {model_idx}")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(os.path.join(output_dir, f"loss_curve_model_{model_idx}.png"))
-    plt.close()
+def save_classification_report(y_pred, y_true, number_of_labels, output_dir, i):
+    """
+    Salva relatório de classificação
+    """
+    report = classification_report(y_true, y_pred, output_dict=True)
+    with open(os.path.join(output_dir, f'classification_report_model_{i}.txt'), 'w') as f:
+        f.write(classification_report(y_true, y_pred))
+
