@@ -366,7 +366,7 @@ def main():
             model = torch.nn.DataParallel(model)
         
         # Configurar otimizador e loss
-        optimizer = torch.optim.Adam(model.parameters(), lr=best_params["lr"])
+        optimizer = torch.optim.Adam(model.parameters(), lr=best_params["learning_rate"])
         criterion = nn.CrossEntropyLoss()
         
         # Configurar mixed precision se disponível

@@ -1,7 +1,4 @@
 """
-Utilitários para detecção de quedas
-
-Funções organizadas por categoria:
 - Treinamento e validação
 - Otimização com Optuna
 - Salvamento e análise
@@ -28,6 +25,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import f1_score
 import json
 import seaborn as sns
+from config import Config
 
 # =============================================================================
 # TREINAMENTO E VALIDAÇÃO
@@ -142,38 +140,36 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
 
     # Sugerir hiperparâmetros
     model_type = restrict_model_type if restrict_model_type else trial.suggest_categorical("model_type", ["CNN1D", "MLP", "LSTM"])
-    dropout = trial.suggest_float('dropout', 0.1, 0.5, step=0.1)
-    learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
-    decision_threshold = trial.suggest_float('decision_threshold', 0.5, 0.9, step=0.1)
+    dropout = trial.suggest_float('dropout', Config.METRICS_CONFIG['dropout_range'][0], Config.METRICS_CONFIG['dropout_range'][1], step=Config.METRICS_CONFIG['dropout_step'])
+    learning_rate = trial.suggest_float('learning_rate', Config.OPTIMIZER_CONFIG['lr_range'][0], Config.OPTIMIZER_CONFIG['lr_range'][1], log=Config.OPTIMIZER_CONFIG['lr_log'])
+    decision_threshold = trial.suggest_float('decision_threshold', Config.METRICS_CONFIG['decision_threshold_range'][0], Config.METRICS_CONFIG['decision_threshold_range'][1], step=Config.METRICS_CONFIG['decision_threshold_step'])
 
     mcc_scores = []
     all_train_losses = []
     all_val_losses = []
 
-    # Cross-validation
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    # Cross-validation usando configurações do Config
+    skf = StratifiedKFold(n_splits=Config.CV_CONFIG['n_splits'], shuffle=Config.CV_CONFIG['shuffle'], random_state=Config.CV_CONFIG['random_state'])
 
     for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_trainval, y_trainval.argmax(axis=1) if len(y_trainval.shape) > 1 else y_trainval)):
         print(f"\n Fold {fold_idx + 1}/{skf.get_n_splits()} ({model_type})")
 
         # Definir seeds para reprodutibilidade
-        torch.manual_seed(42 + fold_idx)
-        torch.cuda.manual_seed_all(42 + fold_idx)
-        np.random.seed(42 + fold_idx)
-        random.seed(42 + fold_idx)
+        Config.set_seed(Config.SEED + fold_idx)
 
         X_train, X_val = X_trainval[train_idx], X_trainval[val_idx]
         y_train, y_val = y_trainval[train_idx], y_trainval[val_idx]
 
-        batch_size = 32
+        batch_size = Config.TRAINING_CONFIG['batch_size']
 
         # Criar modelo baseado no tipo
         if model_type == "CNN1D":
-            filter_size = trial.suggest_int("filter_size", 16, 128, log=True)
-            kernel_size = trial.suggest_int("kernel_size", 3, 7)
-            num_layers = trial.suggest_int("num_layers", 2, 4)
-            num_dense = trial.suggest_int("num_dense_layers", 1, 2)
-            dense_neurons = trial.suggest_int("dense_neurons", 64, 512, log=True)
+            cnn_config = Config.MODEL_CONFIGS['CNN1D']
+            filter_size = trial.suggest_int("filter_size", cnn_config['filter_size_range'][0], cnn_config['filter_size_range'][1], log=True)
+            kernel_size = trial.suggest_int("kernel_size", cnn_config['kernel_size_range'][0], cnn_config['kernel_size_range'][1])
+            num_layers = trial.suggest_int("num_layers", cnn_config['num_layers_range'][0], cnn_config['num_layers_range'][1])
+            num_dense = trial.suggest_int("num_dense_layers", cnn_config['num_dense_layers_range'][0], cnn_config['num_dense_layers_range'][1])
+            dense_neurons = trial.suggest_int("dense_neurons", cnn_config['dense_neurons_range'][0], cnn_config['dense_neurons_range'][1], log=True)
 
             # Prune se convolução reduz demais
             max_seq_len = input_shape_dict["CNN1D"][0]
@@ -184,15 +180,17 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
             model = CNN1DNet(input_shape_dict["CNN1D"], filter_size, kernel_size, num_layers, num_dense, dense_neurons, dropout, num_labels)
 
         elif model_type == "MLP":
-            num_layers = trial.suggest_int("num_layers", 1, 4)
+            mlp_config = Config.MODEL_CONFIGS['MLP']
+            num_layers = trial.suggest_int("num_layers", mlp_config['num_layers_range'][0], mlp_config['num_layers_range'][1])
     
-            max_dense = min(1024, max(64, input_shape_dict["MLP"] // 4))  # garante que max_dense >= 64
-            dense_neurons = trial.suggest_int("dense_neurons", 64, max_dense, log=True)
+            max_dense = min(mlp_config['dense_neurons_range'][1], max(mlp_config['dense_neurons_range'][0], input_shape_dict["MLP"] // 4))
+            dense_neurons = trial.suggest_int("dense_neurons", mlp_config['dense_neurons_range'][0], max_dense, log=True)
             model = MLPNet(input_dim=input_shape_dict["MLP"], num_layers=num_layers, dense_neurons=dense_neurons, dropout=dropout, number_of_labels=num_labels)
 
         elif model_type == "LSTM":
-            hidden_dim = trial.suggest_int("hidden_dim", 64, 256, log=True)
-            num_layers = trial.suggest_int("num_layers", 1, 3)
+            lstm_config = Config.MODEL_CONFIGS['LSTM']
+            hidden_dim = trial.suggest_int("hidden_dim", lstm_config['hidden_dim_range'][0], lstm_config['hidden_dim_range'][1], log=True)
+            num_layers = trial.suggest_int("num_layers", lstm_config['num_layers_range'][0], lstm_config['num_layers_range'][1])
             model = LSTMNet(input_dim=input_shape_dict["LSTM"][1], hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout, number_of_labels=num_labels)
 
         model.to(device)
@@ -214,7 +212,10 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_train, dtype=torch.float32),
                 torch.tensor(np.argmax(y_train, axis=1) if len(y_train.shape) > 1 else y_train, dtype=torch.long)
             ),
-            batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=8
+            batch_size=batch_size, 
+            shuffle=Config.TRAINING_CONFIG['shuffle'], 
+            pin_memory=Config.TRAINING_CONFIG['pin_memory'], 
+            num_workers=Config.TRAINING_CONFIG['num_workers']
         )
 
         val_loader = torch.utils.data.DataLoader(
@@ -222,13 +223,18 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
                 torch.tensor(X_val, dtype=torch.float32),
                 torch.tensor(np.argmax(y_val, axis=1) if len(y_val.shape) > 1 else y_val, dtype=torch.long)
             ),
-            batch_size=batch_size, pin_memory=True, num_workers=8
+            batch_size=batch_size, 
+            pin_memory=Config.TRAINING_CONFIG['pin_memory'], 
+            num_workers=Config.TRAINING_CONFIG['num_workers']
         )
 
         # Treinar modelo com pruning intermediário
         y_pred, y_true, val_losses, train_losses = train(
             model, train_loader, val_loader, optimizer, criterion, device,
-            epochs=25, early_stopping=True, patience=5, trial=trial
+            epochs=Config.TRAINING_CONFIG['epochs'], 
+            early_stopping=Config.TRAINING_CONFIG['early_stopping'], 
+            patience=Config.TRAINING_CONFIG['patience'], 
+            trial=trial
         )
 
         all_train_losses.append(train_losses)
@@ -354,7 +360,7 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels,
         num_labels,
         device,
         restrict_model_type
-    ), n_trials=20, n_jobs=1) # n_trials = 30 original
+    ), n_trials=Config.OPTUNA_CONFIG['n_trials'], n_jobs=Config.OPTUNA_CONFIG['n_jobs'])
 
     print("Melhor MCC:", study.best_value)
     print("Melhores hiperparâmetros:", study.best_params)
