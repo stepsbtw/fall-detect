@@ -1,0 +1,22 @@
+{
+    "trial_number": 11,
+    "model_type": "CNN1D",
+    "params": {
+        "dropout": 0.2,
+        "learning_rate": 0.0001008574880440308,
+        "decision_threshold": 0.6,
+        "filter_size": 31,
+        "kernel_size": 5,
+        "num_layers": 4,
+        "num_dense_layers": 1,
+        "dense_neurons": 479
+    },
+    "mean_mcc": 0.9505911273925157,
+    "mcc_scores": [
+        0.9385660747891933,
+        0.9544127692243982,
+        0.9233758562144264,
+        0.9653667109113476,
+        0.9712342258232135
+    ]
+}

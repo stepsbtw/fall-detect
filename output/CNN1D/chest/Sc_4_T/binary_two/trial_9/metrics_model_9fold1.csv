@@ -1,0 +1,2 @@
+Model,MCC,Sensitivity,Specificity,Precision,Accuracy,tp,tn,fp,fn
+9fold1,0.0,0.9999999999998851,0.0,0.9016563146996995,0.9016563146996995,871,0,95,0

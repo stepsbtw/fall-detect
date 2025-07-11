@@ -1,0 +1,19 @@
+{
+    "trial_number": 18,
+    "model_type": "LSTM",
+    "params": {
+        "dropout": 0.1,
+        "learning_rate": 0.0012607742187941012,
+        "decision_threshold": 0.9,
+        "hidden_dim": 91,
+        "num_layers": 1
+    },
+    "mean_mcc": 0.807192444651091,
+    "mcc_scores": [
+        0.7488546077861317,
+        0.8003615357174656,
+        0.8208443806293627,
+        0.8452751141970423,
+        0.8206265849254518
+    ]
+}
