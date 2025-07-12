@@ -2,21 +2,21 @@
     "trial_number": 9,
     "model_type": "CNN1D",
     "params": {
-        "dropout": 0.4,
-        "learning_rate": 0.005814092132047912,
-        "decision_threshold": 0.7,
-        "filter_size": 54,
+        "dropout": 0.1,
+        "learning_rate": 0.001777687216532392,
+        "decision_threshold": 0.9,
+        "filter_size": 106,
         "kernel_size": 7,
-        "num_layers": 2,
+        "num_layers": 3,
         "num_dense_layers": 2,
-        "dense_neurons": 79
+        "dense_neurons": 340
     },
-    "mean_mcc": 0.7135135487135519,
+    "mean_mcc": 0.9176029933316489,
     "mcc_scores": [
-        0.0,
-        0.8307377838214888,
-        0.9171532876138644,
-        0.9210498772198762,
-        0.8986267949125297
+        0.8813085126790914,
+        0.929572852372326,
+        0.9283692344924722,
+        0.9010380758379533,
+        0.9477262912764015
     ]
 }

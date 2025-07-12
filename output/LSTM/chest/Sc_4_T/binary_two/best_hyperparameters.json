@@ -1,7 +1,0 @@
-{
-    "dropout": 0.1,
-    "learning_rate": 0.0014261634337092294,
-    "decision_threshold": 0.7,
-    "hidden_dim": 87,
-    "num_layers": 1
-}

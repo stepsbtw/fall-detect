@@ -1,0 +1,19 @@
+{
+    "trial_number": 25,
+    "model_type": "MLP",
+    "params": {
+        "dropout": 0.4,
+        "learning_rate": 0.0008066313964823451,
+        "decision_threshold": 0.6,
+        "num_layers": 1,
+        "dense_neurons": 187
+    },
+    "mean_mcc": 0.9369445564646238,
+    "mcc_scores": [
+        0.9073277666490455,
+        0.9221049456520614,
+        0.9587077605677281,
+        0.9544127692243982,
+        0.9421695402298851
+    ]
+}
