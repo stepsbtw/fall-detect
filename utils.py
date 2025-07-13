@@ -553,3 +553,69 @@ def save_classification_report(y_pred, y_true, number_of_labels, output_dir, i):
     with open(os.path.join(output_dir, f'classification_report_model_{i}.txt'), 'w') as f:
         f.write(classification_report(y_true, y_pred))
 
+import shap
+import torch
+
+import shap
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+def compute_feature_importance(model, background_loader, test_loader, model_type, device, num_features, output_dir):
+    """
+    Calcula a importância das features usando SHAP (DeepExplainer) e salva o gráfico no diretório de saída.
+    """
+    model.eval()
+
+    # Obter um batch de fundo e de teste
+    X_background, _ = next(iter(background_loader))
+    X_test, _ = next(iter(test_loader))
+
+    X_background = X_background.to(device)
+    X_test = X_test.to(device)
+
+    # Se estiver usando DataParallel, extraia o modelo real
+    if isinstance(model, torch.nn.DataParallel):
+        model = model.module
+
+    # DeepExplainer (somente para modelos com ReLU etc.)
+    explainer = shap.DeepExplainer(model, X_background)
+    shap_values = explainer.shap_values(X_test)
+
+    # Detectar número de classes
+    if isinstance(shap_values, list):
+        class_index = 1 if len(shap_values) > 1 else 0
+    else:
+        class_index = 0
+
+    # Nomes padrão das features (até 8)
+    base_feature_names = [
+        "acc_x", "acc_y", "acc_z",
+        "gyr_x", "gyr_y", "gyr_z",
+        "mag_acc", "mag_gyr"
+    ]
+
+    if num_features <= len(base_feature_names):
+        feature_names = base_feature_names[:num_features]
+    else:
+        feature_names = [f"feature_{i}" for i in range(num_features)]
+
+    # Criar o gráfico summary
+    shap.summary_plot(
+        shap_values[class_index],         # valores para a classe 1 (queda) ou 0
+        X_test.cpu().numpy(),
+        feature_names=feature_names,
+        show=False
+    )
+
+    # Salvar no output_dir
+    shap_out_path = os.path.join(output_dir, "shap_summary_plot.png")
+    plt.tight_layout()
+    plt.savefig(shap_out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    print(f"Gráfico de importância das features salvo em: {shap_out_path}")
+
+    np.save(os.path.join(output_dir, "shap_values.npy"), shap_values[class_index])
+    np.save(os.path.join(output_dir, "X_test_for_shap.npy"), X_test.cpu().numpy())

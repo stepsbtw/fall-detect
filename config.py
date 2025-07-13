@@ -63,7 +63,7 @@ class Config:
     #     Hiperparâmetros Optuna    #
     # ----------------------------- #
     OPTUNA_CONFIG = {
-        'n_trials': 50,
+        'n_trials': 20, # 50
         #'timeout': 3600,  # 1 hora
         'n_jobs': 1
     }

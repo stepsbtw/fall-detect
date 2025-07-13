@@ -424,11 +424,51 @@ def main():
         analyze_results(base_out, Config.FINAL_TRAINING['num_models'])
     else:
         print(f"\nAnálise de resultados pulada (--no_analysis)")
-    
+
     print(f"\n{'='*50}")
     print(f"PROCESSO COMPLETO CONCLUÍDO!")
     print(f"{'='*50}")
     print(f"Resultados salvos em: {base_out}")
+
+    # ----------------------------- #
+    #  Análise de Importância (SHAP)
+    # ----------------------------- #
+    print(f"\n{'='*50}")
+    print("IMPORTÂNCIA DAS FEATURES (SHAP)")
+    print(f"{'='*50}")
+
+    from utils import compute_feature_importance
+
+    # Carregar melhor modelo
+    best_model_path = os.path.join(base_out, "best_models", "model_1.pt")
+    model = create_model(model_type, best_params, input_shape, num_labels)
+    model.load_state_dict(torch.load(best_model_path))
+    model.to(Config.DEVICE)
+
+    # Recarregar loaders (trecho já usado antes)
+    batch_size = Config.TRAINING_CONFIG['batch_size']
+    train_loader = DataLoader(
+        TensorDataset(torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.long)),
+        batch_size=batch_size,
+        shuffle=False
+    )
+    test_loader = DataLoader(
+        TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)),
+        batch_size=batch_size,
+        shuffle=False
+    )
+
+    # Calcular importância
+    compute_feature_importance(
+        model=model,
+        background_loader=train_loader,
+        test_loader=test_loader,
+        model_type=model_type,
+        device=Config.DEVICE,
+        num_features=input_shape[1] if isinstance(input_shape, tuple) else input_shape,
+        output_dir=base_out
+    )
+
 
 if __name__ == "__main__":
     main() 
