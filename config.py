@@ -166,28 +166,25 @@ class Config:
         """Retorna o dicionário de shapes de entrada para cada modelo"""
         array_size = cls.get_array_size(position)
         scenario_config = cls.SCENARIOS[scenario]
-        
-        # Ajustar shape baseado no array_size
-        if position == "chest":
-            input_shape = scenario_config[1]
-        else:  # left or right
-            # Ajustar para 450 samples
-            if scenario_config[1][1] == 1:  # 1 feature
-                input_shape = (450, 1)
-            elif scenario_config[1][1] == 2:  # 2 features
-                input_shape = (450, 2)
-            elif scenario_config[1][1] == 3:  # 3 features
-                input_shape = (450, 3)
-            elif scenario_config[1][1] == 6:  # 6 features
-                input_shape = (450, 6)
-        
+
+        # Detectar o número de canais originais
+        _, original_shape = scenario_config  # ex: (filename, (450, 6))
+
+        # Assumimos que se tinha 6 features (3 acc + 3 gyr), agora terá 8 (magnitude acc + gyr)
+        num_features = original_shape[1]
+        if num_features == 6:
+            num_features += 2  # adiciona magnitude_acc e magnitude_gyr
+
+        input_shape = (original_shape[0], num_features)  # ex: (450, 8)
+
         input_shape_dict = {
             "CNN1D": input_shape,
             "MLP": np.prod(input_shape),
             "LSTM": input_shape
         }
-        
+
         return input_shape_dict
+
     
     @classmethod
     def setup_device(cls):

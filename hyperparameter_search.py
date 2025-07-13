@@ -65,7 +65,12 @@ def main():
     scenario_config = Config.SCENARIOS[scenario]
     X = np.load(os.path.join(data_path, scenario_config[0]))
     y = np.load(os.path.join(label_path, Config.LABELS_DICT[label_type])).astype(np.int64)
-    
+
+    from utils import add_magnitude_channels
+
+    X = np.load(os.path.join(data_path, scenario_config[0]))
+    X = add_magnitude_channels(X)
+        
     if model_type_arg == "LSTM":
         if len(X.shape) == 2:
             X = X.reshape((X.shape[0], -1, 1))

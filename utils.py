@@ -553,3 +553,25 @@ def save_classification_report(y_pred, y_true, number_of_labels, output_dir, i):
     with open(os.path.join(output_dir, f'classification_report_model_{i}.txt'), 'w') as f:
         f.write(classification_report(y_true, y_pred))
 
+def add_magnitude_channels(X):
+    """
+    Espera X no formato [samples, channels, time] ou [samples, time, channels].
+    Retorna X com dois novos canais: magnitude do acelerômetro e magnitude do giroscópio.
+    """
+    # Detectar o eixo dos canais
+    if X.shape[1] == 6:  # [samples, 6, time]
+        acc = X[:, 0:3, :]
+        gyr = X[:, 3:6, :]
+        mag_acc = np.sqrt(np.sum(acc ** 2, axis=1, keepdims=True))
+        mag_gyr = np.sqrt(np.sum(gyr ** 2, axis=1, keepdims=True))
+        return np.concatenate([X, mag_acc, mag_gyr], axis=1)
+    
+    elif X.shape[2] == 6:  # [samples, time, 6]
+        acc = X[:, :, 0:3]
+        gyr = X[:, :, 3:6]
+        mag_acc = np.sqrt(np.sum(acc ** 2, axis=2, keepdims=True))
+        mag_gyr = np.sqrt(np.sum(gyr ** 2, axis=2, keepdims=True))
+        return np.concatenate([X, mag_acc, mag_gyr], axis=2)
+    
+    else:
+        raise ValueError("Formato de entrada inesperado. Esperado [samples, 6, time] ou [samples, time, 6].")
