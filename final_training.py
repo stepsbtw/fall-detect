@@ -439,11 +439,23 @@ def main():
 
     from utils import compute_feature_importance
 
-    # Carregar melhor modelo
-    best_model_path = os.path.join(base_out, "best_models", "model_1.pt")
+    # Identificar o melhor modelo com base no MCC do all_metrics.csv
+    all_metrics_path = os.path.join(base_out, "all_metrics.csv")
+    if not os.path.exists(all_metrics_path):
+        raise FileNotFoundError(f"Arquivo de métricas não encontrado: {all_metrics_path}")
+
+    metrics_df = pd.read_csv(all_metrics_path)
+    best_model_idx = metrics_df['MCC'].idxmax()
+    best_model_num = best_model_idx + 1  # os modelos começam em 1
+
+    print(f"\nMelhor modelo identificado: model_{best_model_num} (MCC = {metrics_df.loc[best_model_idx, 'MCC']:.4f})")
+
+    # Carregar o modelo correspondente
+    best_model_path = os.path.join(base_out, "best_models", f"model_{best_model_num}.pt")
     model = create_model(model_type, best_params, input_shape, num_labels)
     model.load_state_dict(torch.load(best_model_path))
     model.to(Config.DEVICE)
+
 
     # Recarregar loaders (sem shuffle)
     train_loader = DataLoader(

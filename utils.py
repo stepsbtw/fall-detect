@@ -561,62 +561,65 @@ def compute_feature_importance(model, background_loader, test_loader, model_type
     """
     model.eval()
 
-    # Obter um batch de fundo e teste
-    X_background, _ = next(iter(background_loader))
-    X_test, _ = next(iter(test_loader))
-
-    # Selecionar subconjunto para desempenho
-    X_background = X_background[:20].to(device)  # fundo (referência)
-    X_test = X_test[:50].to(device)              # teste (explanação)
-
-    print(f"Calculando SHAP com {X_test.shape[0]} amostras de teste e {X_background.shape[0]} de fundo")
-
+    # Garantir que o modelo não está em DataParallel (pegar módulo interno)
     if isinstance(model, torch.nn.DataParallel):
         model = model.module
 
-    # Criar o explainer
+    # Obter batches únicos do background e test_loader
+    X_background, _ = next(iter(background_loader))
+    X_test, _ = next(iter(test_loader))
+
+    # Selecionar subconjunto limitado (evitar OOM)
+    X_background = X_background[:20].to(device)
+    X_test = X_test[:50].to(device)
+
+    print(f"[SHAP] Calculando com {X_test.shape[0]} amostras de teste e {X_background.shape[0]} de background")
+
+    # Calcular SHAP Values
     explainer = shap.DeepExplainer(model, X_background)
     shap_values = explainer.shap_values(X_test)
 
-    # Para problemas binários, pegamos shap_values[1]
+    # Selecionar classe correta
     class_index = 1 if isinstance(shap_values, list) and len(shap_values) > 1 else 0
 
-    # Nomes das features
+    # Definir nomes das features
     default_names = [
         "acc_x", "acc_y", "acc_z",
         "gyr_x", "gyr_y", "gyr_z",
         "mag_acc", "mag_gyr"
     ]
-    feature_names = default_names[:num_features] if num_features <= len(default_names) else [f"feature_{i}" for i in range(num_features)]
+    feature_names = (
+        default_names[:num_features] 
+        if num_features <= len(default_names) 
+        else [f"feature_{i}" for i in range(num_features)]
+    )
 
-    # Criar gráfico
+    # Plotar resumo do SHAP
     shap.summary_plot(
         shap_values[class_index],
-        X_test.cpu().numpy(),
+        X_test.detach().cpu().numpy(),
         feature_names=feature_names,
         show=False
     )
 
-    # Salvar gráfico
+    # Salvar figura
     shap_out_path = os.path.join(output_dir, "shap_summary_plot.png")
     plt.tight_layout()
     plt.savefig(shap_out_path, dpi=300, bbox_inches="tight")
     plt.close()
 
-    print(f"Gráfico de importância das features salvo em: {shap_out_path}")
+    print(f"[SHAP] Gráfico salvo em: {shap_out_path}")
+
 
 
     np.save(os.path.join(output_dir, "shap_values.npy"), shap_values[class_index])
     np.save(os.path.join(output_dir, "X_test_for_shap.npy"), X_test.cpu().numpy())
 
-def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_shape, num_labels, best_params, device, output_dir, fractions=[0.1, 0.2, 0.4, 0.6, 0.8, 1.0]):
+def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_shape, num_labels, best_params, device, output_dir, fractions=[0.1, 0.2, 0.4, 0.6, 0.8, 1.0], epochs=10, seed=42):
     """
     Gera a curva de aprendizado variando a fração do dataset de treino.
     """
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from sklearn.metrics import matthews_corrcoef
-
+    rng = np.random.RandomState(seed)  # Para resultados reproduzíveis
     results = []
 
     print(f"\n{'='*50}")
@@ -625,7 +628,7 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
 
     for frac in fractions:
         size = int(len(X_full) * frac)
-        idx = np.random.choice(len(X_full), size, replace=False)
+        idx = rng.choice(len(X_full), size, replace=False)
         X_subset = X_full[idx]
         y_subset = y_full[idx]
 
@@ -638,17 +641,22 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
         optimizer = torch.optim.Adam(model.parameters(), lr=best_params["learning_rate"])
         criterion = torch.nn.CrossEntropyLoss()
 
-        # DataLoaders
-        batch_size = Config.TRAINING_CONFIG['batch_size']
-        train_loader = torch.utils.DataLoader(torch.utils.TensorDataset(torch.tensor(X_subset, dtype=torch.float32), torch.tensor(y_subset, dtype=torch.long)),
-                                  batch_size=batch_size, shuffle=True)
-        test_loader = torch.utils.DataLoader(torch.utils.TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)),
-                                 batch_size=batch_size)
+        batch_size =  Config.TRAINING_CONFIG.get('batch_size', 32)
+        train_loader = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(torch.tensor(X_subset, dtype=torch.float32), torch.tensor(y_subset, dtype=torch.long)),
+            batch_size=batch_size,
+            shuffle=True
+        )
+        test_loader = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)),
+            batch_size=batch_size,
+            shuffle=False
+        )
 
-        # Treinamento curto (ex.: 10 épocas)
+        # Treinamento curto
         _, _, _, _ = train(
             model, train_loader, test_loader, optimizer, criterion, device,
-            epochs=10,
+            epochs=epochs,
             early_stopping=False,
             patience=5,
             scaler=None
@@ -670,7 +678,6 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
         mcc = matthews_corrcoef(y_true, y_preds)
 
         print(f"MCC com {size} amostras: {mcc:.4f}")
-
         results.append((frac, mcc))
 
     # Plotar curva
@@ -690,6 +697,12 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
     print(f"Curva de aprendizado salva em: {lc_plot_path}")
 
     # Salvar dados brutos
-    np.savetxt(os.path.join(output_dir, "learning_curve.csv"), results, delimiter=",", header="Fraction,MCC", comments='')
+    np.savetxt(
+        os.path.join(output_dir, "learning_curve.csv"),
+        results,
+        delimiter=",",
+        header="Fraction,MCC",
+        comments=''
+    )
 
     print(f"Dados da curva de aprendizado salvos em: {output_dir}")
