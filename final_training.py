@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from neural_networks import CNN1DNet, MLPNet, LSTMNet
-from utils import train, save_results, plot_loss_curve
+from utils import train, save_results, plot_loss_curve, plot_learning_curve
 from config import Config
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -445,20 +445,19 @@ def main():
     model.load_state_dict(torch.load(best_model_path))
     model.to(Config.DEVICE)
 
-    # Recarregar loaders (trecho já usado antes)
-    batch_size = Config.TRAINING_CONFIG['batch_size']
+    # Recarregar loaders (sem shuffle)
     train_loader = DataLoader(
         TensorDataset(torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.long)),
-        batch_size=batch_size,
+        batch_size=Config.TRAINING_CONFIG['batch_size'],
         shuffle=False
     )
     test_loader = DataLoader(
         TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)),
-        batch_size=batch_size,
+        batch_size=Config.TRAINING_CONFIG['batch_size'],
         shuffle=False
     )
 
-    # Calcular importância
+    # Análise SHAP (limite 50/20)
     compute_feature_importance(
         model=model,
         background_loader=train_loader,
@@ -466,6 +465,22 @@ def main():
         model_type=model_type,
         device=Config.DEVICE,
         num_features=input_shape[1] if isinstance(input_shape, tuple) else input_shape,
+        output_dir=base_out
+    )
+
+
+    print(f"\n{'='*50}")
+    print("GERANDO CURVA DE APRENDIZADO")
+    print(f"{'='*50}")
+
+    plot_learning_curve(
+        create_model_fn=lambda best_params, input_shape, num_labels: create_model(model_type, best_params, input_shape, num_labels),
+        X_full=X, y_full=y,
+        X_test=X_test, y_test=y_test,
+        input_shape=input_shape,
+        num_labels=num_labels,
+        best_params=best_params,
+        device=Config.DEVICE,
         output_dir=base_out
     )
 

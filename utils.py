@@ -4,6 +4,7 @@
 - Salvamento e análise
 - Visualizações
 - Métricas
+- Shap Values
 """
 
 import torch
@@ -26,6 +27,7 @@ from sklearn.metrics import f1_score
 import json
 import seaborn as sns
 from config import Config
+import shap
 
 # =============================================================================
 # TREINAMENTO E VALIDAÇÃO
@@ -553,12 +555,6 @@ def save_classification_report(y_pred, y_true, number_of_labels, output_dir, i):
     with open(os.path.join(output_dir, f'classification_report_model_{i}.txt'), 'w') as f:
         f.write(classification_report(y_true, y_pred))
 
-import shap
-import torch
-import matplotlib.pyplot as plt
-import os
-import numpy as np
-
 def compute_feature_importance(model, background_loader, test_loader, model_type, device, num_features, output_dir):
     """
     Calcula e plota a importância das features com SHAP (DeepExplainer), usando amostras reduzidas.
@@ -612,3 +608,88 @@ def compute_feature_importance(model, background_loader, test_loader, model_type
 
     np.save(os.path.join(output_dir, "shap_values.npy"), shap_values[class_index])
     np.save(os.path.join(output_dir, "X_test_for_shap.npy"), X_test.cpu().numpy())
+
+def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_shape, num_labels, best_params, device, output_dir, fractions=[0.1, 0.2, 0.4, 0.6, 0.8, 1.0]):
+    """
+    Gera a curva de aprendizado variando a fração do dataset de treino.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import matthews_corrcoef
+
+    results = []
+
+    print(f"\n{'='*50}")
+    print("INICIANDO GERAÇÃO DA LEARNING CURVE")
+    print(f"{'='*50}")
+
+    for frac in fractions:
+        size = int(len(X_full) * frac)
+        idx = np.random.choice(len(X_full), size, replace=False)
+        X_subset = X_full[idx]
+        y_subset = y_full[idx]
+
+        print(f"\nTreinando com {size} amostras ({int(frac*100)}% do dataset)")
+
+        # Criar modelo
+        model = create_model_fn(best_params, input_shape, num_labels)
+        model.to(device)
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=best_params["learning_rate"])
+        criterion = torch.nn.CrossEntropyLoss()
+
+        # DataLoaders
+        batch_size = Config.TRAINING_CONFIG['batch_size']
+        train_loader = torch.utils.DataLoader(torch.utils.TensorDataset(torch.tensor(X_subset, dtype=torch.float32), torch.tensor(y_subset, dtype=torch.long)),
+                                  batch_size=batch_size, shuffle=True)
+        test_loader = torch.utils.DataLoader(torch.utils.TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)),
+                                 batch_size=batch_size)
+
+        # Treinamento curto (ex.: 10 épocas)
+        _, _, _, _ = train(
+            model, train_loader, test_loader, optimizer, criterion, device,
+            epochs=10,
+            early_stopping=False,
+            patience=5,
+            scaler=None
+        )
+
+        # Avaliação final
+        model.eval()
+        y_preds = []
+        y_true = []
+        with torch.no_grad():
+            for xb, yb in test_loader:
+                xb = xb.to(device)
+                preds = model(xb)
+                y_preds.append(torch.argmax(preds, dim=1).cpu().numpy())
+                y_true.append(yb.numpy())
+
+        y_preds = np.concatenate(y_preds)
+        y_true = np.concatenate(y_true)
+        mcc = matthews_corrcoef(y_true, y_preds)
+
+        print(f"MCC com {size} amostras: {mcc:.4f}")
+
+        results.append((frac, mcc))
+
+    # Plotar curva
+    fractions_plot, mccs_plot = zip(*results)
+    plt.figure(figsize=(8, 6))
+    plt.plot(np.array(fractions_plot) * 100, mccs_plot, marker='o')
+    plt.xlabel("Porcentagem de Dados de Treino (%)")
+    plt.ylabel("MCC no Teste")
+    plt.title("Curva de Aprendizado (Learning Curve)")
+    plt.grid(True)
+    plt.tight_layout()
+
+    lc_plot_path = os.path.join(output_dir, "learning_curve.png")
+    plt.savefig(lc_plot_path, dpi=300)
+    plt.close()
+
+    print(f"Curva de aprendizado salva em: {lc_plot_path}")
+
+    # Salvar dados brutos
+    np.savetxt(os.path.join(output_dir, "learning_curve.csv"), results, delimiter=",", header="Fraction,MCC", comments='')
+
+    print(f"Dados da curva de aprendizado salvos em: {output_dir}")

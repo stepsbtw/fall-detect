@@ -105,7 +105,7 @@ python final_training.py -scenario Sc1_acc_T -position chest -label_type binary_
 
 ```bash
 # Executar pipeline completo para múltiplas configurações
-bash my_reports.sh
+bash all.sh
 ```
 
 ## Cenários Disponíveis
