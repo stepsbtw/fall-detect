@@ -333,7 +333,7 @@ def main():
     print(f"\nMelhor modelo identificado: model_{best_model_num} (MCC = {metrics_df.loc[best_model_idx, 'MCC']:.4f})")
 
     # Carregar o modelo correspondente
-    best_model_path = os.path.join(base_out, "best_models", f"model_{best_model_num}.pt")
+    best_model_path = os.path.join(base_out, f"model_{best_model_num}/model_{best_model_num}.pt")
     model = create_model(model_type, best_params, input_shape, num_labels)
     model.load_state_dict(torch.load(best_model_path))
     model.to(Config.DEVICE)

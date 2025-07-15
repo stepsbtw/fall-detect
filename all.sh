@@ -15,7 +15,7 @@ for cenario in "${cenarios[@]}"; do
         # Busca de hiperparâmetros
         if [ ! -f "$trials_file" ]; then
           echo "Buscando hiperparâmetros: $cenario $nn $sensor $label"
-          python hyperparameter_search.py -scenario "$cenario" -position "$sensor" -label_type "$label" --nn "$nn"
+          python post_trials.py -scenario "$cenario" -position "$sensor" -label_type "$label" --nn "$nn"
         else
           echo "Trials já existem: $trials_file"
         fi
