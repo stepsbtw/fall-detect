@@ -76,7 +76,7 @@ class Config:
         'early_stopping': True,
         'patience': 5,
         'batch_size': 32,
-        'num_workers': 8,
+        'num_workers': 2,
         'pin_memory': True,
         'shuffle': True
     }
@@ -195,6 +195,30 @@ class Config:
         }
         
         return input_shape_dict
+    
+    @classmethod
+    def get_feature_names(cls, scenario):
+        """Retorna a lista de nomes reais das features para cada cenário"""
+        # Mapear nomes de features por cenário
+        feature_map = {
+            # 1D
+            "Sc1_acc_T": ["magacc"],
+            "Sc1_gyr_T": ["maggyr"],
+            "Sc1_acc_F": ["magacc"],
+            "Sc1_gyr_F": ["maggyr"],
+            # 3D
+            "Sc_2_acc_T": ["acc_x", "acc_y", "acc_z"],
+            "Sc_2_gyr_T": ["gyr_x", "gyr_y", "gyr_z"],
+            "Sc_2_acc_F": ["acc_x", "acc_y", "acc_z"],
+            "Sc_2_gyr_F": ["gyr_x", "gyr_y", "gyr_z"],
+            # 2D
+            "Sc_3_T": ["magacc", "maggyr"],
+            "Sc_3_F": ["magacc", "maggyr"],
+            # 6D
+            "Sc_4_T": ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"],
+            "Sc_4_F": ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"],
+        }
+        return feature_map.get(scenario, [f"f{i}" for i in range(cls.SCENARIOS[scenario][1][1])])
     
     @classmethod
     def setup_device(cls):

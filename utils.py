@@ -27,7 +27,6 @@ from sklearn.metrics import f1_score
 import json
 import seaborn as sns
 from config import Config
-import shap
 
 # =============================================================================
 # TREINAMENTO E VALIDAÇÃO
@@ -555,71 +554,17 @@ def save_classification_report(y_pred, y_true, number_of_labels, output_dir, i):
     with open(os.path.join(output_dir, f'classification_report_model_{i}.txt'), 'w') as f:
         f.write(classification_report(y_true, y_pred))
 
-def compute_feature_importance(model, background_loader, test_loader, model_type, device, num_features, output_dir):
-    """
-    Calcula e plota a importância das features com SHAP (DeepExplainer), usando amostras reduzidas.
-    """
-    model.eval()
 
-    # Garantir que o modelo não está em DataParallel (pegar módulo interno)
-    if isinstance(model, torch.nn.DataParallel):
-        model = model.module
-
-    # Obter batches únicos do background e test_loader
-    X_background, _ = next(iter(background_loader))
-    X_test, _ = next(iter(test_loader))
-
-    # Selecionar subconjunto limitado (evitar OOM)
-    X_background = X_background[:20].to(device)
-    X_test = X_test[:50].to(device)
-
-    print(f"[SHAP] Calculando com {X_test.shape[0]} amostras de teste e {X_background.shape[0]} de background")
-
-    # Calcular SHAP Values
-    explainer = shap.DeepExplainer(model, X_background)
-    shap_values = explainer.shap_values(X_test)
-
-    # Selecionar classe correta
-    class_index = 1 if isinstance(shap_values, list) and len(shap_values) > 1 else 0
-
-    # Definir nomes das features
-    default_names = [
-        "acc_x", "acc_y", "acc_z",
-        "gyr_x", "gyr_y", "gyr_z",
-        "mag_acc", "mag_gyr"
-    ]
-    feature_names = (
-        default_names[:num_features] 
-        if num_features <= len(default_names) 
-        else [f"feature_{i}" for i in range(num_features)]
-    )
-
-    # Plotar resumo do SHAP
-    shap.summary_plot(
-        shap_values[class_index],
-        X_test.detach().cpu().numpy(),
-        feature_names=feature_names,
-        show=False
-    )
-
-    # Salvar figura
-    shap_out_path = os.path.join(output_dir, "shap_summary_plot.png")
-    plt.tight_layout()
-    plt.savefig(shap_out_path, dpi=300, bbox_inches="tight")
-    plt.close()
-
-    print(f"[SHAP] Gráfico salvo em: {shap_out_path}")
-
-
-
-    np.save(os.path.join(output_dir, "shap_values.npy"), shap_values[class_index])
-    np.save(os.path.join(output_dir, "X_test_for_shap.npy"), X_test.cpu().numpy())
-
-def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_shape, num_labels, best_params, device, output_dir, fractions=[0.1, 0.2, 0.4, 0.6, 0.8, 1.0], epochs=10, seed=42):
+def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_shape, num_labels, best_params, device, output_dir, fractions=None, epochs=10, seed=42):
     """
     Gera a curva de aprendizado variando a fração do dataset de treino.
+    Agora salva MCC, F1-score, Accuracy, Loss de treino e validação para cada fração.
     """
-    rng = np.random.RandomState(seed)  # Para resultados reproduzíveis
+    from sklearn.metrics import f1_score, accuracy_score, matthews_corrcoef
+    import pandas as pd
+    if fractions is None:
+        fractions = [0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    rng = np.random.RandomState(seed)
     results = []
 
     print(f"\n{'='*50}")
@@ -654,7 +599,7 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
         )
 
         # Treinamento curto
-        _, _, _, _ = train(
+        y_pred, y_true, val_losses, train_losses = train(
             model, train_loader, test_loader, optimizer, criterion, device,
             epochs=epochs,
             early_stopping=False,
@@ -665,44 +610,126 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
         # Avaliação final
         model.eval()
         y_preds = []
-        y_true = []
+        y_true_final = []
         with torch.no_grad():
             for xb, yb in test_loader:
                 xb = xb.to(device)
                 preds = model(xb)
                 y_preds.append(torch.argmax(preds, dim=1).cpu().numpy())
-                y_true.append(yb.numpy())
+                y_true_final.append(yb.numpy())
 
         y_preds = np.concatenate(y_preds)
-        y_true = np.concatenate(y_true)
-        mcc = matthews_corrcoef(y_true, y_preds)
+        y_true_final = np.concatenate(y_true_final)
+        mcc = matthews_corrcoef(y_true_final, y_preds)
+        f1 = f1_score(y_true_final, y_preds, average="macro")
+        acc = accuracy_score(y_true_final, y_preds)
+        train_loss_mean = np.mean(train_losses)
+        val_loss_mean = np.mean(val_losses)
 
-        print(f"MCC com {size} amostras: {mcc:.4f}")
-        results.append((frac, mcc))
+        print(f"MCC: {mcc:.4f} | F1: {f1:.4f} | Acc: {acc:.4f} | Train Loss: {train_loss_mean:.4f} | Val Loss: {val_loss_mean:.4f}")
+        results.append({
+            "Fraction": frac,
+            "MCC": mcc,
+            "F1": f1,
+            "Accuracy": acc,
+            "Train_Loss": train_loss_mean,
+            "Val_Loss": val_loss_mean
+        })
 
-    # Plotar curva
-    fractions_plot, mccs_plot = zip(*results)
-    plt.figure(figsize=(8, 6))
-    plt.plot(np.array(fractions_plot) * 100, mccs_plot, marker='o')
+    # Salvar CSV
+    df = pd.DataFrame(results)
+    csv_path = os.path.join(output_dir, "learning_curve_metrics.csv")
+    df.to_csv(csv_path, index=False)
+    print(f"Métricas da curva de aprendizado salvas em: {csv_path}")
+
+    # Plotar curvas
+    plt.figure(figsize=(10, 7))
+    plt.plot(df["Fraction"]*100, df["MCC"], marker='o', label="MCC")
+    plt.plot(df["Fraction"]*100, df["F1"], marker='o', label="F1-score")
+    plt.plot(df["Fraction"]*100, df["Accuracy"], marker='o', label="Accuracy")
+    plt.plot(df["Fraction"]*100, df["Train_Loss"], marker='o', label="Train Loss")
+    plt.plot(df["Fraction"]*100, df["Val_Loss"], marker='o', label="Val Loss")
     plt.xlabel("Porcentagem de Dados de Treino (%)")
-    plt.ylabel("MCC no Teste")
-    plt.title("Curva de Aprendizado (Learning Curve)")
+    plt.ylabel("Valor da Métrica")
+    plt.title("Curva de Aprendizado - MCC, F1, Accuracy, Loss")
+    plt.legend()
     plt.grid(True)
     plt.tight_layout()
-
     lc_plot_path = os.path.join(output_dir, "learning_curve.png")
     plt.savefig(lc_plot_path, dpi=300)
     plt.close()
-
     print(f"Curva de aprendizado salva em: {lc_plot_path}")
 
-    # Salvar dados brutos
-    np.savetxt(
-        os.path.join(output_dir, "learning_curve.csv"),
-        results,
-        delimiter=",",
-        header="Fraction,MCC",
-        comments=''
-    )
 
-    print(f"Dados da curva de aprendizado salvos em: {output_dir}")
+
+from collections import OrderedDict
+
+def load_model_state(model, path, device='cpu'):
+    """
+    Carrega um modelo PyTorch de forma robusta, removendo 'module.' se necessário.
+    """
+    state_dict = torch.load(path, map_location=device)
+
+    # Se tiver o prefixo "module.", remove
+    if any(k.startswith('module.') for k in state_dict.keys()):
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            new_key = k.replace("module.", "")
+            new_state_dict[new_key] = v
+        state_dict = new_state_dict
+
+    model.load_state_dict(state_dict)
+    return model
+
+def load_hyperparameters(output_dir):
+    """Carrega os melhores hiperparâmetros encontrados"""
+    import os, json
+    results_file = os.path.join(output_dir, "best_hyperparameters.json")
+    if not os.path.exists(results_file):
+        raise FileNotFoundError(f"Arquivo de hiperparâmetros não encontrado: {results_file}")
+    with open(results_file, 'r') as f:
+        results = json.load(f)
+    return results
+
+def load_test_data(output_dir):
+    """Carrega os dados de teste salvos"""
+    import os, numpy as np
+    test_data_file = os.path.join(output_dir, "test_data.npz")
+    if not os.path.exists(test_data_file):
+        raise FileNotFoundError(f"Arquivo de dados de teste não encontrado: {test_data_file}")
+    data = np.load(test_data_file)
+    return data['X_test'], data['y_test']
+
+def create_model(model_type, best_params, input_shape, num_labels):
+    """Cria o modelo com os melhores hiperparâmetros"""
+    from neural_networks import CNN1DNet, MLPNet, LSTMNet
+    if model_type == "CNN1D":
+        model = CNN1DNet(
+            input_shape=input_shape,
+            filter_size=best_params["filter_size"],
+            kernel_size=best_params["kernel_size"],
+            num_layers=best_params["num_layers"],
+            num_dense_layers=best_params["num_dense_layers"],
+            dense_neurons=best_params["dense_neurons"],
+            dropout=best_params["dropout"],
+            number_of_labels=num_labels
+        )
+    elif model_type == "MLP":
+        model = MLPNet(
+            input_dim=input_shape,
+            num_layers=best_params["num_layers"],
+            dense_neurons=best_params["dense_neurons"],
+            dropout=best_params["dropout"],
+            number_of_labels=num_labels
+        )
+    elif model_type == "LSTM":
+        model = LSTMNet(
+            input_dim=input_shape[1],
+            hidden_dim=best_params["hidden_dim"],
+            num_layers=best_params["num_layers"],
+            dropout=best_params["dropout"],
+            number_of_labels=num_labels
+        )
+    else:
+        raise ValueError(f"Tipo de modelo não suportado: {model_type}")
+    return model

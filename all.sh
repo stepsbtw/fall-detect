@@ -23,14 +23,21 @@ for cenario in "${cenarios[@]}"; do
         # Treinamento final ou SHAP direto
         if [ -f "$best_file" ]; then
           if [ -f "$summary_file" ]; then
-            echo "summary_metrics.csv já existe — PULANDO treinamento final. Rodando SHAP."
-            python shap_importance.py -scenario "$cenario" -position "$sensor" -label_type "$label" --nn "$nn"
+            echo "summary_metrics.csv já existe — PULANDO treinamento final. Rodando Permutation Importance."
+            python permutation_importance.py -scenario "$cenario" -position "$sensor" -label_type "$label" --nn "$nn"
+            lc_metrics_file="${outdir}/learning_curve_metrics.csv"
+            if [ ! -f "$lc_metrics_file" ]; then
+              echo "Rodando curva de aprendizado (learning curve) para $cenario $nn $sensor $label"
+              python learning_curve.py -scenario "$cenario" -position "$sensor" -label_type "$label" --nn "$nn"
+            else
+              echo "Learning curve já existe: $lc_metrics_file — pulando."
+            fi
           else
             echo "Treinando modelos finais: $cenario $nn $sensor $label"
             python final_training.py -scenario "$cenario" -position "$sensor" -label_type "$label" --nn "$nn" --num_models 20
           fi
         else
-          echo "Hiperparâmetros não encontrados, pulando treinamento final e SHAP."
+          echo "Hiperparâmetros não encontrados, pulando treinamento final e Permutation Importance."
         fi
 
       done

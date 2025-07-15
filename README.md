@@ -22,13 +22,16 @@ fall-detect/
 ├── utils.py                  # Funções utilitárias organizadas
 ├── neural_networks.py        # Arquiteturas das redes neurais
 ├── requirements.txt          # Dependências
-├── my_reports.sh            # Script de automação (pipeline)
-├── extract_reports.sh       # Script para extração de relatórios
-├── generate_datasets.py     # Geração de datasets
-├── builders/                # Builders para dados
-├── labels_and_data/         # Dados e labels
-├── database/                # Base de dados
-└── README.md                # Este arquivo
+├── all.sh                    # Pipeline automatizado
+├── analysis.py               # Análise global dos resultados
+├── learning_curve.py         # Geração de curva de aprendizado
+├── permutation_importance.py # Permutation Feature Importance
+├── generate_datasets.py      # Geração de datasets
+├── builders/                 # Builders para dados
+├── labels_and_data/          # Dados e labels
+├── database/                 # Base de dados
+├── analise_global/           # Resultados agregados e gráficos
+└── README.md                 # Este arquivo
 ```
 
 ## Início
@@ -49,6 +52,7 @@ Disponível em: https://zenodo.org/records/12760391
 python generate_datasets.py chest
 python generate_datasets.py left
 python generate_datasets.py right
+```
 
 ## Configurações
 
@@ -77,7 +81,25 @@ python final_training.py -scenario Sc1_acc_T -position chest -label_type binary_
 
 **Nota:** A análise de resultados é executada automaticamente após o treinamento. Use `--no_analysis` para pular a análise.
 
-### 3. Pipeline Automatizado
+### 3. Permutation Feature Importance (`permutation_importance.py`)
+
+```bash
+python permutation_importance.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D
+```
+
+### 4. Curva de Aprendizado (`learning_curve.py`)
+
+```bash
+python learning_curve.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D
+```
+
+### 5. Análise Global dos Resultados (`analysis.py`)
+
+```bash
+python analysis.py
+```
+
+### 6. Pipeline Automatizado
 
 ```bash
 # Executar pipeline completo para múltiplas configurações
@@ -86,27 +108,30 @@ bash all.sh
 
 ## Fluxo de Trabalho Recomendado
 
-### 1. Busca de Hiperparâmetros
-
-```bash
-# Executar busca para encontrar melhores hiperparâmetros
-python hyperparameter_search.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D --n_trials 50
-```
-
-### 2. Treinamento Final (com análise automática)
-
-```bash
-# Treinar modelos finais com os melhores hiperparâmetros
-# A análise de resultados é executada automaticamente
-python final_training.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D --num_models 20
-```
-
-### 3. Pipeline Automatizado
-
-```bash
-# Executar pipeline completo para múltiplas configurações
-bash all.sh
-```
+1. **Busca de Hiperparâmetros**
+   ```bash
+   python hyperparameter_search.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D --n_trials 50
+   ```
+2. **Treinamento Final (com análise automática)**
+   ```bash
+   python final_training.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D --num_models 20
+   ```
+3. **Permutation Importance**
+   ```bash
+   python permutation_importance.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D
+   ```
+4. **Curva de Aprendizado**
+   ```bash
+   python learning_curve.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D
+   ```
+5. **Análise Global**
+   ```bash
+   python analysis.py
+   ```
+6. **Pipeline Automatizado**
+   ```bash
+   bash all.sh
+   ```
 
 ## Cenários Disponíveis
 
@@ -122,6 +147,9 @@ bash all.sh
 - **Sc_3_F**: Acelerômetro + Giroscópio magnitude, domínio frequência
 - **Sc_4_T**: Acelerômetro + Giroscópio 3 eixos, domínio temporal
 - **Sc_4_F**: Acelerômetro + Giroscópio 3 eixos, domínio frequência
+
+(Faltou o SC_5 magnitude + 3 eixos)
+Na prática, para a análise deste trabalho, não existe necessidade de testar todos os cenários, sabemos que em deeplearning, podemos pegar o dataset mais informativo sem problemas.
 
 ## Posições
 
@@ -148,13 +176,13 @@ bash all.sh
 - `best_hyperparameters.json`: Melhores hiperparâmetros encontrados
 - `test_data.npz`: Dados de teste salvos
 - `optuna_trials.csv`: Resultados de todos os trials
-- `param_importance.png`: Importância dos hiperparâmetros
+- `param_importance.png`/`.html`: Importância dos hiperparâmetros
 - Diretórios `trial_X/`: Resultados de cada trial do Optuna
 
 ### Treinamento Final + Análise
 - Diretórios `model_X/`: Resultados de cada modelo treinado
   - `model_X.pt`: Modelo salvo
-  - `metrics_model_X.csv`: Métricas do modelo
+  - `metrics_model_X.csv`/`.txt`: Métricas do modelo
   - `loss_curve_model_X.png`: Curva de loss
   - `confusion_matrix_model_X.png`: Matriz de confusão
   - `roc_curve_model_X.png`: Curva ROC
@@ -168,7 +196,18 @@ bash all.sh
   - `correlation_heatmap.png`: Matriz de correlação
   - `best_models/`: Diretório com cópias dos melhores modelos
 
-## Configurações Avançadas
+### Permutation Importance
+- `permutation_importance.csv`: Importância das features via permutação
+- `permutation_importance.png`: Gráfico de importância das features
+
+### Curva de Aprendizado
+- `learning_curve.csv`: Dados da curva de aprendizado
+- `learning_curve_metrics.csv`: Métricas por fração de dados
+- `learning_curve.png`: Gráfico da curva de aprendizado
+
+### Análise Global (analise_global/)
+- Boxplots, curvas, gráficos agregados de todos os experimentos
+- Comparações entre modelos, cenários, posições e métricas
 
 ### Modificar Configurações
 
