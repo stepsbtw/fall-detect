@@ -1,9 +1,11 @@
 /__pycache__
 /.venv
+/venv
 
 /database
 /labels_and_data
 
-*.pt
-
 builders/__pycache__
+
+Miniconda3-latest-Linux-x86_64.sh
+output/**/trial_*/*

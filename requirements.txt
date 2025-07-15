@@ -5,12 +5,13 @@ seaborn
 optuna
 pandas
 
---index-url https://download.pytorch.org/whl/cu118
-torch
-
-tensorboard
-torchmetrics
-
 optuna[visualization]
 kaleido
 plotly
+
+shap
+
+--index-url https://download.pytorch.org/whl/cu118
+torch
+tensorboard
+torchmetrics
