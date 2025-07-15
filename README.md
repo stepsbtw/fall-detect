@@ -99,39 +99,12 @@ python learning_curve.py -scenario Sc1_acc_T -position chest -label_type binary_
 python analysis.py
 ```
 
-### 6. Pipeline Automatizado
+## Pipeline Automatizado
 
 ```bash
 # Executar pipeline completo para múltiplas configurações
 bash all.sh
 ```
-
-## Fluxo de Trabalho Recomendado
-
-1. **Busca de Hiperparâmetros**
-   ```bash
-   python hyperparameter_search.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D --n_trials 50
-   ```
-2. **Treinamento Final (com análise automática)**
-   ```bash
-   python final_training.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D --num_models 20
-   ```
-3. **Permutation Importance**
-   ```bash
-   python permutation_importance.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D
-   ```
-4. **Curva de Aprendizado**
-   ```bash
-   python learning_curve.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D
-   ```
-5. **Análise Global**
-   ```bash
-   python analysis.py
-   ```
-6. **Pipeline Automatizado**
-   ```bash
-   bash all.sh
-   ```
 
 ## Cenários Disponíveis
 
