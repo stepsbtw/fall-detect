@@ -76,19 +76,33 @@ def main():
     else:
         input_shape = input_shape_dict["MLP"]
     model = create_model(model_type, best_params, input_shape, num_labels)
-    best_model_path = os.path.join(base_out, f"model_1/model_1.pt")
+
+    # Encontrar o melhor modelo pelo maior MCC
+    all_metrics_path = os.path.join(base_out, "all_metrics.csv")
+    if not os.path.exists(all_metrics_path):
+        raise FileNotFoundError(f"Arquivo de métricas não encontrado: {all_metrics_path}")
+    metrics_df = pd.read_csv(all_metrics_path)
+    if "MCC" not in metrics_df.columns:
+        raise ValueError("Coluna MCC não encontrada em all_metrics.csv")
+    best_idx = metrics_df["MCC"].idxmax() + 1  # model_1, model_2, ...
+    best_model_path = os.path.join(base_out, f"model_{best_idx}", f"model_{best_idx}.pt")
     model = load_model_state(model, best_model_path, device=device)
     model.to(device)
 
     X_test, y_test = load_test_data(base_out)
     feature_names = Config.get_feature_names(scenario)
 
+    # Novo diretório de saída para permutation importance
+    perm_out = os.path.join("analise_global", "permutation_importance")
+    os.makedirs(perm_out, exist_ok=True)
+    prefix = f"{model_type}_{position}_{scenario}_{label_type}"
+
     print(f"Rodando Permutation Feature Importance para {model_type}...")
     importances, base_mcc, base_f1, base_acc = permutation_importance(model, X_test, y_test, device, feature_names)
 
     # Salvar CSV
     df = pd.DataFrame(importances)
-    csv_path = os.path.join(base_out, "permutation_importance.csv")
+    csv_path = os.path.join(perm_out, f"permutation_importance_{prefix}.csv")
     df.to_csv(csv_path, index=False)
     print(f"Resultados salvos em: {csv_path}")
 
@@ -101,9 +115,9 @@ def main():
     plt.title(f"Permutation Importance - {model_type}")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(base_out, "permutation_importance.png"))
+    plt.savefig(os.path.join(perm_out, f"permutation_importance_{prefix}.png"))
     plt.close()
-    print(f"Gráfico salvo em: {os.path.join(base_out, 'permutation_importance.png')}")
+    print(f"Gráfico salvo em: {os.path.join(perm_out, f'permutation_importance_{prefix}.png')}")
     print(f"Métricas originais: MCC={base_mcc:.4f}, F1={base_f1:.4f}, Acc={base_acc:.4f}")
 
 if __name__ == "__main__":

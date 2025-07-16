@@ -1,74 +1,11 @@
 import argparse
 import os
-import json
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from neural_networks import CNN1DNet, MLPNet, LSTMNet
-from utils import train, save_results, plot_loss_curve, plot_learning_curve
+from utils import train, save_results
 from config import Config
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-import shutil
-from utils import load_model_state  # ou onde você salvar essa função
-
-def load_hyperparameters(output_dir):
-    """Carrega os melhores hiperparâmetros encontrados"""
-    results_file = os.path.join(output_dir, "best_hyperparameters.json")
-    
-    if not os.path.exists(results_file):
-        raise FileNotFoundError(f"Arquivo de hiperparâmetros não encontrado: {results_file}")
-    
-    with open(results_file, 'r') as f:
-        results = json.load(f)
-    
-    return results
-
-def load_test_data(output_dir):
-    """Carrega os dados de teste salvos"""
-    test_data_file = os.path.join(output_dir, "test_data.npz")
-    
-    if not os.path.exists(test_data_file):
-        raise FileNotFoundError(f"Arquivo de dados de teste não encontrado: {test_data_file}")
-    
-    data = np.load(test_data_file)
-    return data['X_test'], data['y_test']
-
-def create_model(model_type, best_params, input_shape, num_labels):
-    """Cria o modelo com os melhores hiperparâmetros"""
-    if model_type == "CNN1D":
-        model = CNN1DNet(
-            input_shape=input_shape,
-            filter_size=best_params["filter_size"],
-            kernel_size=best_params["kernel_size"],
-            num_layers=best_params["num_layers"],
-            num_dense_layers=best_params["num_dense_layers"],
-            dense_neurons=best_params["dense_neurons"],
-            dropout=best_params["dropout"],
-            number_of_labels=num_labels
-        )
-    elif model_type == "MLP":
-        model = MLPNet(
-            input_dim=input_shape,
-            num_layers=best_params["num_layers"],
-            dense_neurons=best_params["dense_neurons"],
-            dropout=best_params["dropout"],
-            number_of_labels=num_labels
-        )
-    elif model_type == "LSTM":
-        model = LSTMNet(
-            input_dim=input_shape[1],
-            hidden_dim=best_params["hidden_dim"],
-            num_layers=best_params["num_layers"],
-            dropout=best_params["dropout"],
-            number_of_labels=num_labels
-        )
-    else:
-        raise ValueError(f"Tipo de modelo não suportado: {model_type}")
-    
-    return model
+from utils import load_hyperparameters, load_test_data, create_model 
 
 # --- Remover funções de análise e visualização ---
 # Remover: analyze_results, create_visualizations, copy_best_models

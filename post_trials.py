@@ -2,6 +2,10 @@ import os
 import optuna
 import json
 import optuna.visualization as vis
+import argparse
+import numpy as np
+from sklearn.model_selection import train_test_split
+from config import Config
 
 def load_optuna(output_dir, study_name):
 
@@ -31,14 +35,6 @@ def load_optuna(output_dir, study_name):
         print(f"Could not save importance plot: {e}")
 
     return study
-
-import argparse
-import os
-import json
-import numpy as np
-from sklearn.model_selection import train_test_split
-from utils import run_optuna
-from config import Config
 
 def main():
     """Script para busca de hiperparâmetros usando Optuna"""
