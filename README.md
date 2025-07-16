@@ -2,7 +2,7 @@
 
 Adaptação para o PyTorch do trabalho original : https://AILAB-CEFET-RJ/falldetection
 
-Baseado no artigo - A Machine Learning Approach to Automatic Fall Detection of Soldiers: https://arxiv.org/abs/2501.15655v2
+Baseado no artigo (não publicado) - A Machine Learning Approach to Automatic Fall Detection of Soldiers: https://arxiv.org/abs/2501.15655v2
 
 Além da adaptação, K-Fold Cross Validation e o modelo LSTM foi implementado e testado junto aos demais.
 
@@ -12,37 +12,24 @@ Suporta 3 arquiteturas de redes neurais, **CNN1D**, **MLP** e **LSTM**, com **ot
 
 Também foi implementado o Early Stopping e o Median Pruning do Optuna.
 
-## Estrutura do Projeto
+## Funcionalidades
 
-```
-fall-detect/
-├── config.py                 # Configurações centralizadas
-├── hyperparameter_search.py  # Script para busca de hiperparâmetros
-├── final_training.py         # Script para treinamento final + análise
-├── utils.py                  # Funções utilitárias organizadas
-├── neural_networks.py        # Arquiteturas das redes neurais
-├── requirements.txt          # Dependências
-├── all.sh                    # Pipeline automatizado
-├── analysis.py               # Análise global dos resultados
-├── learning_curve.py         # Geração de curva de aprendizado
-├── permutation_importance.py # Permutation Feature Importance
-├── generate_datasets.py      # Geração de datasets
-├── builders/                 # Builders para dados
-├── labels_and_data/          # Dados e labels
-├── database/                 # Base de dados
-├── analise_global/           # Resultados agregados e gráficos
-└── README.md                 # Este arquivo
-```
+- **3 Arquiteturas de Redes Neurais**: CNN1D, MLP, LSTM
+- **Otimização Bayesiana**: Via Optuna com Early Stopping
+- **Análise de Importância**: Permutation Feature Importance
+- **Explicabilidade**: Análise SHAP para interpretabilidade
+- **Curvas de Aprendizado**: Análise de performance vs dados
+- **Validação Cruzada**: K-Fold Cross Validation
+- **Pipeline Automatizado**: Script `all.sh` para execução completa
+- **Análise Global**: Comparações entre modelos e cenários
 
-## Início
+## Instalação e Configuração
 
 ### 1. Instale as dependências
 
 ```bash
 pip install -r requirements.txt
 ```
-
----
 
 ### 2. Baixe e Descompacte os Dados Originais
 Disponível em: https://zenodo.org/records/12760391
@@ -52,6 +39,11 @@ Disponível em: https://zenodo.org/records/12760391
 python generate_datasets.py chest
 python generate_datasets.py left
 python generate_datasets.py right
+```
+
+### 4. Valide os Datasets
+```bash
+python validate_datasets.py
 ```
 
 ## Configurações
@@ -67,44 +59,21 @@ O arquivo `config.py` centraliza todas as configurações do projeto:
 
 ## Modos de Execução
 
-### 1. Busca de Hiperparâmetros (`hyperparameter_search.py`)
-
-```bash
-python hyperparameter_search.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D --n_trials 20 --timeout 3600
-```
-
-### 2. Treinamento Final (`final_training.py`)
-
-```bash
-python final_training.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D --num_models 20 --epochs 25
-```
-
-**Nota:** A análise de resultados é executada automaticamente após o treinamento. Use `--no_analysis` para pular a análise.
-
-### 3. Permutation Feature Importance (`permutation_importance.py`)
-
-```bash
-python permutation_importance.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D
-```
-
-### 4. Curva de Aprendizado (`learning_curve.py`)
-
-```bash
-python learning_curve.py -scenario Sc1_acc_T -position chest -label_type binary_one --nn CNN1D
-```
-
-### 5. Análise Global dos Resultados (`analysis.py`)
-
-```bash
-python analysis.py
-```
-
-## Pipeline Automatizado
+### Pipeline Automatizado Completo
 
 ```bash
 # Executar pipeline completo para múltiplas configurações
 bash all.sh
 ```
+
+O script `all.sh` executa automaticamente:
+1. Validação dos datasets
+2. Busca de hiperparâmetros (se necessário)
+3. Treinamento final (se necessário)
+4. Permutation Feature Importance
+5. Curvas de aprendizado
+6. Análise SHAP
+7. Análise global
 
 ## Cenários Disponíveis
 
@@ -118,22 +87,24 @@ bash all.sh
 - **Sc_2_gyr_F**: Giroscópio 3 eixos, domínio frequência
 - **Sc_3_T**: Acelerômetro + Giroscópio magnitude, domínio temporal
 - **Sc_3_F**: Acelerômetro + Giroscópio magnitude, domínio frequência
-- **Sc_4_T**: Acelerômetro + Giroscópio 3 eixos, domínio temporal
+- **Sc_4_T**: Acelerômetro + Giroscópio 3 eixos, domínio temporal (Recomendado)
 - **Sc_4_F**: Acelerômetro + Giroscópio 3 eixos, domínio frequência
 
-(Faltou o SC_5 magnitude + 3 eixos)
-Na prática, para a análise deste trabalho, não existe necessidade de testar todos os cenários, sabemos que em deeplearning, podemos pegar o dataset mais informativo sem problemas.
+> **Nota**: Sc_4_T é o cenário mais informativo e recomendado para análise.
+
+O mais indicado seria um cenário 5, com:
+- **Sc_5_T**: Acelerômetro + Giroscópio 3 eixos, + Magnitudes, domínio temporal
 
 ## Posições
 
-- **chest**: Dados do peito (1020 samples)
+- **chest**: Dados do peito (1020 samples) (Recomendado)
 - **left**: Dados do lado esquerdo (450 samples)
 - **right**: Dados do lado direito (450 samples)
 
 ## Tipos de Labels
 
 - **binary_one**: Classificação binária (2 classes)
-- **binary_two**: Classificação binária alternativa (2 classes)
+- **binary_two**: Classificação binária alternativa (2 classes) (Recomendado)
 - **multiple_one**: Classificação múltipla (37 classes)
 - **multiple_two**: Classificação múltipla alternativa (26 classes)
 
@@ -142,6 +113,31 @@ Na prática, para a análise deste trabalho, não existe necessidade de testar t
 - **CNN1D**: Rede neural convolucional 1D
 - **MLP**: Multi-layer perceptron
 - **LSTM**: Long short-term memory
+
+## Estrutura do Projeto
+
+```
+fall-detect/
+├── config.py                 # Configurações centralizadas
+├── hyperparameter_search.py  # Script para busca de hiperparâmetros
+├── post_trials.py           # Processamento pós-trials do Optuna
+├── final_training.py         # Script para treinamento final + análise
+├── utils.py                  # Funções utilitárias organizadas
+├── neural_networks.py        # Arquiteturas das redes neurais
+├── requirements.txt          # Dependências
+├── all.sh                    # Pipeline automatizado completo
+├── analysis.py               # Análise global dos resultados
+├── learning_curve.py         # Geração de curva de aprendizado
+├── permutation_importance.py # Permutation Feature Importance
+├── shap_importance.py        # Análise SHAP para explicabilidade
+├── validate_datasets.py      # Validação dos datasets gerados
+├── generate_datasets.py      # Geração de datasets
+├── builders/                 # Builders para dados
+├── labels_and_data/          # Dados e labels
+├── database/                 # Base de dados
+├── analise_global/           # Resultados agregados e gráficos
+└── README.md                 # Este arquivo
+```
 
 ## Saídas Geradas
 
@@ -178,15 +174,51 @@ Na prática, para a análise deste trabalho, não existe necessidade de testar t
 - `learning_curve_metrics.csv`: Métricas por fração de dados
 - `learning_curve.png`: Gráfico da curva de aprendizado
 
-### Análise Global (analise_global/)
-- Boxplots, curvas, gráficos agregados de todos os experimentos
-- Comparações entre modelos, cenários, posições e métricas
+### Análise SHAP
+- `shap_values_*.npy`: Valores SHAP salvos
+- `shap_importance_*.csv`: Importância das features via SHAP
+- `shap_importance_*.png`: Gráficos de importância SHAP
+- `shap_importance_class*_*.csv/png`: Análise por classe
 
-### Modificar Configurações
+### Análise Global (`analise_global/`)
+- **Boxplots**: Comparações entre modelos e métricas
+- **Curvas ROC**: Comparações de performance
+- **Matrizes de Confusão**: Agregadas por modelo
+- **Curvas de Aprendizado**: Comparações de learning curves
+- **Importância de Features**: Permutation e SHAP
+- **Análise Optuna**: Convergência e importância de parâmetros
+- **Relatórios de Classificação**: Métricas detalhadas
 
-Edite o arquivo `config.py` para alterar:
+Aqui, focamos em gerar o melhor modelo, são dispositivos diferentes com frequências diferentes, além de que precisariamos das 3 entradas para funcionar, então foi usado para análise o dataset do peito.
 
-- Número de trials do Optuna
-- Configurações de treinamento
-- Ranges de hiperparâmetros
-- Configurações de GPU
+## Exemplos de Uso
+
+### Execução Rápida (Recomendado)
+```bash
+# Pipeline completo para o cenário mais informativo
+bash all.sh
+```
+
+### Execução Personalizada
+```bash
+# 1. Validar datasets
+python validate_datasets.py
+
+# 2. Buscar hiperparâmetros para LSTM
+python post_trials.py -scenario Sc_4_T -position chest -label_type binary_two --nn LSTM
+
+# 3. Treinar modelos finais
+python final_training.py -scenario Sc_4_T -position chest -label_type binary_two --nn LSTM --num_models 20
+
+# 4. Análise de importância
+python permutation_importance.py -scenario Sc_4_T -position chest -label_type binary_two --nn LSTM
+
+# 5. Curva de aprendizado
+python learning_curve.py -scenario Sc_4_T -position chest -label_type binary_two --nn LSTM
+
+# 6. Análise SHAP
+python shap_importance.py -scenario Sc_4_T -position chest -label_type binary_two --nn LSTM
+
+# 7. Análise global
+python analysis.py
+```
