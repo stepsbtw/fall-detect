@@ -52,7 +52,7 @@ def main():
     # Dividir X_trainval em treino e validação para os 20treinos finais
     X_train, X_val, y_train, y_val = train_test_split(
         X_trainval, y_trainval,
-        test_size=0.2 # 20 validação
+        test_size=Config.DATA_SPLIT['test_size'],
         random_state=Config.DATA_SPLIT['random_state']
     )
     
@@ -104,6 +104,6 @@ def main():
         print(f"Modelo {i} treinado e salvo em {model_dir}")
     print(f"\nTreinamento final concluído! Resultados salvos em: {base_out}")
 
-    # --- Remover chamada para análise automática, visualizações e cópia de modelos ---
-    if __name__ == "__main__":
-        main() 
+# --- Remover chamada para análise automática, visualizações e cópia de modelos ---
+if __name__ == "__main__":
+    main() 
