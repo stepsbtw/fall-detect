@@ -142,10 +142,10 @@ def main():
     
     print(f"\nResultados salvos em: {results_file}")
     
-    # Salvar dados de teste para treinamento final
+    # Salvar dados de treino/validação e teste para treinamento final
     test_data_file = os.path.join(base_out, "test_data.npz")
-    np.savez(test_data_file, X_test=X_test, y_test=y_test)
-    print(f"Dados de teste salvos em: {test_data_file}")
+    np.savez(test_data_file, X_trainval=X_trainval, y_trainval=y_trainval, X_test=X_test, y_test=y_test)
+    print(f"Dados de treino/validação e teste salvos em: {test_data_file}")
     
     print(f"\nBusca de hiperparâmetros concluída!")
     print(f"Próximo passo: executar treinamento final com os melhores parâmetros")

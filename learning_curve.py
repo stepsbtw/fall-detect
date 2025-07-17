@@ -32,25 +32,22 @@ def main():
     best_params = results["best_params"]
     model_type = best_params["model_type"] if not model_type_arg else model_type_arg
 
-    # Carregar dados
-    data_path = os.path.join(Config.DATA_PATH, position)
-    label_path = os.path.join(Config.LABEL_PATH, position)
-    scenario_config = Config.SCENARIOS[scenario]
-    X = np.load(os.path.join(data_path, scenario_config[0]))
-    y = np.load(os.path.join(label_path, Config.LABELS_DICT[label_type])).astype(np.int64)
-    X_test, y_test = load_test_data(base_out)
+    # Carregar dados salvos
+    data = np.load(os.path.join(base_out, "test_data.npz"))
+    X_trainval, y_trainval = data['X_trainval'], data['y_trainval']
+    X_test, y_test = data['X_test'], data['y_test']
 
     input_shape_dict = Config.get_input_shape_dict(scenario, position, model_type)
     if model_type == "CNN1D":
         input_shape = input_shape_dict["CNN1D"]
     elif model_type == "LSTM":
-        input_shape = X.shape[1:]
+        input_shape = X_trainval.shape[1:]
     else:  # MLP
         input_shape = input_shape_dict["MLP"]
 
     plot_learning_curve(
         create_model_fn=lambda best_params, input_shape, num_labels: create_model(model_type, best_params, input_shape, num_labels),
-        X_full=X, y_full=y,
+        X_full=X_trainval, y_full=y_trainval,
         X_test=X_test, y_test=y_test,
         input_shape=input_shape,
         num_labels=num_labels,

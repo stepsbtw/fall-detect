@@ -6,6 +6,8 @@ from torch.utils.data import DataLoader, TensorDataset
 from utils import train, save_results
 from config import Config
 from utils import load_hyperparameters, load_test_data, create_model 
+import numpy as np
+from sklearn.model_selection import train_test_split
 
 # --- Remover funções de análise e visualização ---
 # Remover: analyze_results, create_visualizations, copy_best_models
@@ -43,11 +45,21 @@ def main():
     best_params = load_hyperparameters(base_out)
     model_type = best_params["model_type"] if "model_type" in best_params else model_type_arg
     # Carregar dados de treino/validação/teste
-    X_test, y_test = load_test_data(base_out)
+    data = np.load(os.path.join(base_out, "test_data.npz"))
+    X_trainval, y_trainval = data['X_trainval'], data['y_trainval']
+    X_test, y_test = data['X_test'], data['y_test']
+    
+    # Dividir X_trainval em treino e validação para os 20treinos finais
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_trainval, y_trainval,
+        test_size=0.2 # 20 validação
+        random_state=Config.DATA_SPLIT['random_state']
+    )
+    
     input_shape_dict = Config.get_input_shape_dict(scenario, position, model_type)
     input_shape = input_shape_dict[model_type]
     # Treinamento dos modelos finais
-    for i in range(1, num_models + 1):
+    for i in range(1, num_models +1):
         print(f"\nTreinando modelo final {i}/{num_models}...")
         model = create_model(model_type, best_params, input_shape, num_labels)
         model.to(Config.DEVICE)
@@ -55,22 +67,33 @@ def main():
         criterion = nn.CrossEntropyLoss()
         batch_size = Config.TRAINING_CONFIG.get('batch_size', 32)
         train_loader = DataLoader(
-            TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)),
+            TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long)),
             batch_size=batch_size, shuffle=True
+        )
+        val_loader = DataLoader(
+            TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)),
+            batch_size=batch_size, shuffle=False
         )
         # Treinar
         y_pred, y_true, val_losses, train_losses = train(
-            model, train_loader, train_loader, optimizer, criterion, Config.DEVICE,
+            model, train_loader, val_loader, optimizer, criterion, Config.DEVICE,
             epochs=epochs, early_stopping=False, patience=5, scaler=None
         )
         # Salvar modelo
         model_dir = os.path.join(base_out, f"model_{i}")
         os.makedirs(model_dir, exist_ok=True)
         torch.save(model.state_dict(), os.path.join(model_dir, f"model_{i}.pt"))
-        # Salvar métricas brutas
+        
+        # Criar loader para dados de teste para avaliação final
+        test_loader = DataLoader(
+            TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)),
+            batch_size=batch_size, shuffle=False
+        )
+        
+        # Salvar métricas brutas usando dados de teste
         save_results(
             model=model,
-            val_loader=train_loader,
+            val_loader=test_loader,
             y_val_onehot=y_test,
             number_of_labels=num_labels,
             i=i,

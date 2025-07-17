@@ -7,5 +7,8 @@
 
 builders/__pycache__
 
+/output_old/
+/analise_global_old/
+
 Miniconda3-latest-Linux-x86_64.sh
 output/**/trial_*/*
