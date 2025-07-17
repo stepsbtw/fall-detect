@@ -43,6 +43,8 @@ def main():
     os.makedirs(base_out, exist_ok=True)
     # Carregar hiperparâmetros
     best_params = load_hyperparameters(base_out)
+    if "best_params" in best_params:
+        best_params = best_params["best_params"]
     model_type = best_params["model_type"] if "model_type" in best_params else model_type_arg
     # Carregar dados de treino/validação/teste
     data = np.load(os.path.join(base_out, "test_data.npz"))
