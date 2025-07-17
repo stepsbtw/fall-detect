@@ -55,7 +55,8 @@ def main():
     X_train, X_val, y_train, y_val = train_test_split(
         X_trainval, y_trainval,
         test_size=Config.DATA_SPLIT['test_size'],
-        random_state=Config.DATA_SPLIT['random_state']
+        random_state=Config.DATA_SPLIT['random_state'],
+        shuffle=False
     )
     
     input_shape_dict = Config.get_input_shape_dict(scenario, position, model_type)
@@ -85,6 +86,17 @@ def main():
         model_dir = os.path.join(base_out, f"model_{i}")
         os.makedirs(model_dir, exist_ok=True)
         torch.save(model.state_dict(), os.path.join(model_dir, f"model_{i}.pt"))
+
+        # Salvar curva de loss por época
+        from utils import plot_loss_curve
+        plot_loss_curve(train_losses, val_losses, model_dir, f"{i}")
+        # Salvar arrays de loss em .npy
+        np.save(os.path.join(model_dir, f"train_losses_model_{i}.npy"), np.array(train_losses))
+        np.save(os.path.join(model_dir, f"val_losses_model_{i}.npy"), np.array(val_losses))
+        # Salvar arrays de loss em .csv
+        import pandas as pd
+        df_losses = pd.DataFrame({"epoch": list(range(1, len(train_losses)+1)), "train_loss": train_losses, "val_loss": val_losses})
+        df_losses.to_csv(os.path.join(model_dir, f"losses_model_{i}.csv"), index=False)
         
         # Criar loader para dados de teste para avaliação final
         test_loader = DataLoader(

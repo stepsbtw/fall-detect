@@ -78,6 +78,7 @@ def main():
         X, y, 
         test_size=Config.DATA_SPLIT['test_size'], 
         random_state=Config.DATA_SPLIT['random_state']
+        shuffle=False
     )
     
     print(f"Train/Val split: {X_trainval.shape[0]} amostras")

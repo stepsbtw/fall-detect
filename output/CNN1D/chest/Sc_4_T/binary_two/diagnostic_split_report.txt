@@ -1,0 +1,9 @@
+Distribuição das classes:
+Treino: {np.int64(1): '3487 (90.24%)', np.int64(0): '377 (9.76%)'}
+Validação: {np.int64(0): '99 (10.25%)', np.int64(1): '867 (89.75%)'}
+Teste: {np.int64(1): '1073 (88.82%)', np.int64(0): '135 (11.18%)'}
+
+Overlap de amostras idênticas:
+Treino x Validação: 0
+Treino x Teste: 0
+Validação x Teste: 0
