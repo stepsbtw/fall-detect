@@ -107,7 +107,7 @@ def main():
     X_trainval, X_test, y_trainval, y_test = train_test_split(
         X, y, 
         test_size=Config.DATA_SPLIT['test_size'], 
-        random_state=Config.DATA_SPLIT['random_state']
+        random_state=Config.DATA_SPLIT['random_state'],
         shuffle=False
     )
     
@@ -135,6 +135,8 @@ def main():
     #     Salvar Resultados         #
     # ----------------------------- #
     best_params = study.best_params
+    if "best_params" in best_params:
+       best_params = best_params["best_params"]
     model_type = best_params["model_type"] if not model_type_arg else model_type_arg
     
     print(f"\n{'='*50}")

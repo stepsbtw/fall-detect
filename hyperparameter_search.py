@@ -77,7 +77,7 @@ def main():
     X_trainval, X_test, y_trainval, y_test = train_test_split(
         X, y, 
         test_size=Config.DATA_SPLIT['test_size'], 
-        random_state=Config.DATA_SPLIT['random_state']
+        random_state=Config.DATA_SPLIT['random_state'],
         shuffle=False
     )
     
