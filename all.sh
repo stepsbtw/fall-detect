@@ -81,6 +81,14 @@ for cenario in "${cenarios[@]}"; do
               continue
             fi
             
+            # Agregar métricas dos modelos finais
+            echo "Agregando métricas dos modelos finais..."
+            python aggregate_metrics.py -scenario "$cenario" -position "$sensor" -label_type "$label" --nn "$nn"
+            if [ $? -ne 0 ]; then
+              echo "Erro na agregação de métricas. Pulando..."
+              continue
+            fi
+            
             # Após treinamento bem-sucedido, executar análises
             echo "Rodando Permutation Importance..."
             python permutation_importance.py -scenario "$cenario" -position "$sensor" -label_type "$label" --nn "$nn"
