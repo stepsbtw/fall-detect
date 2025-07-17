@@ -23,11 +23,9 @@ for cenario in "${cenarios[@]}"; do
       for nn in "${redeneural[@]}"; do
         echo ""
         echo "=== Processando: $cenario $nn $sensor $label ==="
-        
         outdir="output/${nn}/${sensor}/${cenario}/${label}"
         best_file="${outdir}/best_hyperparameters.json"
         summary_file="${outdir}/summary_metrics.csv"
-
         if [ -f "$best_file" ]; then
           if [ ! -f "$summary_file" ]; then
             echo "Treinando modelos finais: $cenario $nn $sensor $label"
@@ -51,7 +49,7 @@ for cenario in "${cenarios[@]}"; do
       done
     done
   done
-fi
+done
 
 # --- ETAPA 2: Análises (após todos os modelos estarem prontos) ---
 for cenario in "${cenarios[@]}"; do
@@ -94,7 +92,7 @@ for cenario in "${cenarios[@]}"; do
       done
     done
   done
-fi
+done
 
 echo ""
 echo "=== Análise Global ==="
