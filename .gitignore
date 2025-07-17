@@ -12,3 +12,5 @@ builders/__pycache__
 
 Miniconda3-latest-Linux-x86_64.sh
 output/**/trial_*/*
+
+*.npz

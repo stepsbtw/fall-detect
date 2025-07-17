@@ -76,7 +76,7 @@ class Config:
         'early_stopping': True,
         'patience': 5,
         'batch_size': 32,
-        'num_workers': 2,
+        'num_workers': 6,
         'pin_memory': True,
         'shuffle': True
     }
