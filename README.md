@@ -105,8 +105,6 @@ O mais indicado seria um cenário 5, com:
 
 - **binary_one**: Classificação binária (2 classes)
 - **binary_two**: Classificação binária alternativa (2 classes) (Recomendado)
-- **multiple_one**: Classificação múltipla (37 classes)
-- **multiple_two**: Classificação múltipla alternativa (26 classes)
 
 ## Modelos de Rede Neural
 
@@ -143,7 +141,7 @@ fall-detect/
 
 ### Busca de Hiperparâmetros
 - `best_hyperparameters.json`: Melhores hiperparâmetros encontrados
-- `test_data.npz`: Dados de teste salvos
+- `test_data.npz`: Dados de treino/validação e teste salvos
 - `optuna_trials.csv`: Resultados de todos os trials
 - `param_importance.png`/`.html`: Importância dos hiperparâmetros
 - Diretórios `trial_X/`: Resultados de cada trial do Optuna
@@ -160,9 +158,6 @@ fall-detect/
   - `all_metrics.csv`: Métricas de todos os modelos
   - `summary_metrics.csv`: Estatísticas resumidas
   - `metrics_boxplot.png`: Boxplot das métricas
-  - `mcc_histogram.png`: Histograma do MCC
-  - `mcc_vs_accuracy.png`: Scatter plot MCC vs Accuracy
-  - `correlation_heatmap.png`: Matriz de correlação
   - `best_models/`: Diretório com cópias dos melhores modelos
 
 ### Permutation Importance
