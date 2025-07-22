@@ -205,7 +205,7 @@ bash all.sh
 python validate_datasets.py
 
 # 2. Buscar hiperparâmetros para LSTM
-python post_trials.py -scenario Sc_4_T -position chest -label_type binary_two --nn LSTM
+python hyperparameter_search.py -scenario Sc_4_T -position chest -label_type binary_two --nn LSTM
 
 # 3. Treinar modelos finais
 python final_training.py -scenario Sc_4_T -position chest -label_type binary_two --nn LSTM --num_models 20
