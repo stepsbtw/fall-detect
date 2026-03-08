@@ -1,8 +1,8 @@
 # Fall Detect PyTorch
 
-Adaptação para o PyTorch do trabalho original : https://AILAB-CEFET-RJ/falldetection
+Adaptação para o PyTorch do trabalho original : https://github.com/AILAB-CEFET-RJ/falldetection
 
-Baseado no artigo (não publicado) - A Machine Learning Approach to Automatic Fall Detection of Soldiers: https://arxiv.org/abs/2501.15655v2
+Baseado no artigo (preprint) - A Machine Learning Approach to Automatic Fall Detection of Soldiers: https://arxiv.org/abs/2501.15655v2
 
 Além da adaptação, K-Fold Cross Validation e o modelo LSTM foi implementado e testado junto aos demais.
 
