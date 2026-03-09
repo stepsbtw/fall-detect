@@ -32,7 +32,7 @@ pip install -r requirements.txt
 ```
 
 ### 2. Baixe e Descompacte os Dados Originais
-Disponível em: https://zenodo.org/records/12760391
+Disponível em: https://doi.org/10.5281/zenodo.12760390
 
 ### 3. Gere os Datasets e Labels
 ```bash
