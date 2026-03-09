@@ -3,12 +3,13 @@
 /venv
 
 /database
+/dataset
 /labels_and_data
 
 builders/__pycache__
 
-/output_old/
-/analise_global_old/
+/output/
+/analise_global/
 
 Miniconda3-latest-Linux-x86_64.sh
 output/**/trial_*/*
