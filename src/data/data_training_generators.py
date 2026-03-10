@@ -52,7 +52,7 @@ For example, the ADL_3 activity that lasts 30 seconds turns into 6 arrays of 5 s
 
 def generate_array_of_other_activities(data_array_acc, data_array_gyr, array_size, acc_data_array_list, gyr_data_array_list,
                                        acc_fourier_transformed_data_array_list, gyr_fourier_transformed_data_array_list, label,
-                                       labels_list, groups_list, group_id, generate_labels=None):
+                                       labels_list, groups_list, group_id, timestamp_acc, timestamp_gyr, generate_labels=None):
 
     size_acc_data_array = len(data_array_acc)
     size_gyr_data_array = len(data_array_gyr)
@@ -62,7 +62,30 @@ def generate_array_of_other_activities(data_array_acc, data_array_gyr, array_siz
     else:
         usable_size = size_acc_data_array
 
-    parts = math.floor((usable_size)/array_size)
+    # ── Original observation-count windowing (replaced) ───────────────────────
+    # parts = math.floor(usable_size / array_size)
+    #
+    # This tied the number of sub-windows to the number of observations the
+    # sensor happened to capture, which fluctuates with the real (not nominal)
+    # sampling rate.  When a sensor runs slightly faster or slower, this pipeline
+    # would produce a different window count than generate_fused_dataset.py for
+    # the exact same activity, making the two datasets inconsistent.
+    #
+    # ── Timestamp-based windowing (mirrors generate_fused_dataset.py) ─────────
+    # Count how many complete 5-second intervals fit in the *recorded duration*.
+    # Using wall-clock duration instead of observation count makes the window
+    # count independent of the sampling rate, so single-sensor and fused datasets
+    # always agree on how many sub-windows each long activity produces.
+    WINDOW_MS = 5_000
+    t_start = float(timestamp_acc.iloc[0]) if len(timestamp_acc) > 0 else 0.0
+    t_end = min(
+        float(timestamp_acc.iloc[-1]) if len(timestamp_acc) > 0 else 0.0,
+        float(timestamp_gyr.iloc[-1]) if len(timestamp_gyr) > 0 else 0.0,
+    )
+    parts = int((t_end - t_start) / WINDOW_MS)
+    # Safety cap: never index past the actual data arrays (guards against edge
+    # cases where timestamps and observation counts diverge, e.g. after a gap).
+    parts = min(parts, math.floor(usable_size / array_size))
     initial_index = 0
     final_index = array_size
 
@@ -86,7 +109,8 @@ collected data files. Used inside a "for" loop in the "generate_activities" func
 
 
 def create_data_sets_for_training(position, activity, magacc, xacc, yacc, zacc, maggyr, xgyr, ygyr, zgyr,
-                                  list_of_data_arrays_in_the_time_domain, list_of_data_arrays_in_the_frequency_domain, labels_list, groups_list, group_id):
+                                  list_of_data_arrays_in_the_time_domain, list_of_data_arrays_in_the_frequency_domain, labels_list, groups_list, group_id,
+                                  timestamp_acc, timestamp_gyr):
 
     label = create_labels(activity)
 
@@ -145,25 +169,25 @@ def create_data_sets_for_training(position, activity, magacc, xacc, yacc, zacc, 
                                                list_of_data_arrays_in_the_time_domain[4],
                                                list_of_data_arrays_in_the_frequency_domain[0],
                                                list_of_data_arrays_in_the_frequency_domain[4],
-                                               label, labels_list, groups_list, group_id, "yes")
+                                               label, labels_list, groups_list, group_id, timestamp_acc, timestamp_gyr, "yes")
 
             generate_array_of_other_activities(xacc, xgyr, array_size, list_of_data_arrays_in_the_time_domain[1],
                                                list_of_data_arrays_in_the_time_domain[5],
                                                list_of_data_arrays_in_the_frequency_domain[1],
                                                list_of_data_arrays_in_the_frequency_domain[5],
-                                               label, labels_list, groups_list, group_id)
+                                               label, labels_list, groups_list, group_id, timestamp_acc, timestamp_gyr)
 
             generate_array_of_other_activities(yacc, ygyr, array_size, list_of_data_arrays_in_the_time_domain[2],
                                                list_of_data_arrays_in_the_time_domain[6],
                                                list_of_data_arrays_in_the_frequency_domain[2],
                                                list_of_data_arrays_in_the_frequency_domain[6],
-                                               label, labels_list, groups_list, group_id)
+                                               label, labels_list, groups_list, group_id, timestamp_acc, timestamp_gyr)
 
             generate_array_of_other_activities(zacc, zgyr, array_size, list_of_data_arrays_in_the_time_domain[3],
                                                list_of_data_arrays_in_the_time_domain[7],
                                                list_of_data_arrays_in_the_frequency_domain[3],
                                                list_of_data_arrays_in_the_frequency_domain[7],
-                                               label, labels_list, groups_list, group_id)
+                                               label, labels_list, groups_list, group_id, timestamp_acc, timestamp_gyr)
 
 
 """
@@ -185,6 +209,9 @@ def generate_activities(acc_dataframe, gyr_dataframe, sampling_dataframe, positi
         magacc, xacc, yacc, zacc, maggyr, xgyr, ygyr, zgyr = section_data_array(
             acc_dataframe, gyr_dataframe, i)
 
+        timestamp_acc = acc_dataframe.loc[acc_dataframe["sampling"] == i, "timestamp"].reset_index(drop=True)
+        timestamp_gyr = gyr_dataframe.loc[gyr_dataframe["sampling"] == i, "timestamp"].reset_index(drop=True)
+
         create_data_sets_for_training(position, activity, magacc, xacc, yacc, zacc, maggyr, xgyr, ygyr, zgyr,
                                       list_of_data_arrays_in_the_time_domain, list_of_data_arrays_in_the_frequency_domain,
-                                      labels_list, groups_list, group_id)
+                                      labels_list, groups_list, group_id, timestamp_acc, timestamp_gyr)

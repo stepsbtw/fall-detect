@@ -96,13 +96,13 @@ def section_data_array(acc_dataframe, gyr_dataframe, i, use_in_media_generator=N
     timestamp_acc = acc_dataframe.loc[acc_dataframe["sampling"]
                                       == i, "timestamp"]
     timestamp_acc = timestamp_acc.reset_index(drop=True)
-    timestamp_acc = timestamp_acc.drop(0)
+    timestamp_acc = timestamp_acc.drop(0, errors='ignore')
     timestamp_acc = timestamp_acc.reset_index(drop=True)
 
     timestamp_gyr = gyr_dataframe.loc[gyr_dataframe["sampling"]
                                       == i, "timestamp"]
     timestamp_gyr = timestamp_gyr.reset_index(drop=True)
-    timestamp_gyr = timestamp_gyr.drop(0)
+    timestamp_gyr = timestamp_gyr.drop(0, errors='ignore')
     timestamp_gyr = timestamp_gyr.reset_index(drop=True)
 
     if use_in_media_generator == "yes":
