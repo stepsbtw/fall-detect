@@ -28,10 +28,12 @@ from utils import (
 )
 
 SCENARIO_CHOICES = [
-    "chest_T", "chest_F", "left_T", "left_F", "right_T", "right_F",
-    "chest_left_right_T", "chest_left_right_F",
-    "chest_left_T", "chest_left_F",
-    "chest_right_T", "chest_right_F",
+    "chest_T", # "chest_F",
+    "left_T",  # "left_F",
+    "right_T", # "right_F",
+    # "chest_left_right_T", # "chest_left_right_F",
+    "chest_left_T",  # "chest_left_F",
+    "chest_right_T", # "chest_right_F",
 ]
 
 def run_shap(args):
@@ -39,7 +41,7 @@ def run_shap(args):
     import shap
 
     scenario = args.scenario
-    model_type = args.nn
+    model_type = args.model
     device = Config.DEVICE
 
     base_out = Config.get_output_dir(model_type, scenario)
@@ -132,7 +134,7 @@ def run_shap(args):
 def run_learning_curve(args):
     """Generate and save the learning curve for a scenario."""
     scenario = args.scenario
-    model_type_arg = args.nn
+    model_type_arg = args.model
 
     base_out = Config.get_output_dir(model_type_arg, scenario)
 
@@ -263,7 +265,7 @@ def _aggregate_model_metrics(base_out):
 
 def run_aggregate(args):
     """Aggregate metrics for a trained scenario."""
-    base_out = Config.get_output_dir(args.nn, args.scenario)
+    base_out = Config.get_output_dir(args.model, args.scenario)
     print(f"Diretório de saída: {base_out}")
 
     if not os.path.exists(base_out):
@@ -514,7 +516,7 @@ def build_parser():
 
     def add_scenario_nn(p, nn_required=False):
         p.add_argument("-scenario", required=True, choices=SCENARIO_CHOICES)
-        p.add_argument("--nn", required=nn_required, choices=["CNN1D", "MLP", "LSTM"])
+        p.add_argument("--model", required=nn_required, choices=["CNN1D", "MLP", "LSTM", "RF", "SVM", "XGBoost"])
 
     # --- shap ---
     p_shap = subparsers.add_parser("shap", help="SHAP feature importance for the best model")

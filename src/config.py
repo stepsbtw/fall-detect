@@ -15,20 +15,23 @@ class Config:
     DATA_PATH = os.path.normpath(os.path.join(ROOT_DIR, "..", "dataset"))
     NUM_LABELS = 2
 
+    # Models that use sklearn/XGBoost instead of PyTorch
+    CLASSICAL_MODELS = frozenset({"RF", "SVM", "XGBoost"})
+
     # [directory_name, filename, (seq_len, num_features)]
     SCENARIOS = {
         "chest_T":            ["chest",            "data_time_domain.npy",      (1100, 8)],
-        "chest_F":            ["chest",            "data_frequency_domain.npy", (550,  8)],
+        # "chest_F":            ["chest",            "data_frequency_domain.npy", (550,  8)],
         "left_T":             ["left",             "data_time_domain.npy",      (460,  8)],
-        "left_F":             ["left",             "data_frequency_domain.npy", (230,  8)],
+        # "left_F":             ["left",             "data_frequency_domain.npy", (230,  8)],
         "right_T":            ["right",            "data_time_domain.npy",      (460,  8)],
-        "right_F":            ["right",            "data_frequency_domain.npy", (230,  8)],
+        # "right_F":            ["right",            "data_frequency_domain.npy", (230,  8)],
         "chest_left_T":       ["chest_left",       "data_time_domain.npy",      (460, 16)],
-        "chest_left_F":       ["chest_left",       "data_frequency_domain.npy", (230, 16)],
+        # "chest_left_F":       ["chest_left",       "data_frequency_domain.npy", (230, 16)],
         "chest_right_T":      ["chest_right",      "data_time_domain.npy",      (460, 16)],
-        "chest_right_F":      ["chest_right",      "data_frequency_domain.npy", (230, 16)],
-        "chest_left_right_T": ["chest_left_right", "data_time_domain.npy",      (460, 24)],
-        "chest_left_right_F": ["chest_left_right", "data_frequency_domain.npy", (230, 24)],
+        # "chest_right_F":      ["chest_right",      "data_frequency_domain.npy", (230, 16)],
+        # "chest_left_right_T": ["chest_left_right", "data_time_domain.npy",      (460, 24)],
+        # "chest_left_right_F": ["chest_left_right", "data_frequency_domain.npy", (230, 24)],
     }
 
     OPTUNA_CONFIG = {
@@ -73,6 +76,22 @@ class Config:
         'LSTM': {
             'num_layers_range': (1,  3),
             'hidden_dim_range': (32, 256),
+        },
+        'RF': {
+            'n_estimators_range':      (50, 500),
+            'max_depth_range':         (3,  20),
+            'min_samples_split_range': (2,  20),
+        },
+        'SVM': {
+            'C_range':       (0.01, 100.0),
+            'kernel_choices': ['rbf', 'linear'],
+        },
+        'XGBoost': {
+            'n_estimators_range':     (50,   500),
+            'max_depth_range':        (3,    10),
+            'learning_rate_range':    (0.01, 0.3),
+            'subsample_range':        (0.6,  1.0),
+            'colsample_bytree_range': (0.6,  1.0),
         },
     }
     
@@ -131,6 +150,28 @@ class Config:
             'hidden_dim':        64,
             'num_layers':        2,
         },
+        'RF': {
+            'model_type':        'RF',
+            'decision_threshold': 0.5,
+            'n_estimators':      200,
+            'max_depth':         10,
+            'min_samples_split': 5,
+        },
+        'SVM': {
+            'model_type':        'SVM',
+            'decision_threshold': 0.5,
+            'C':                 1.0,
+            'kernel':            'rbf',
+        },
+        'XGBoost': {
+            'model_type':        'XGBoost',
+            'decision_threshold': 0.5,
+            'n_estimators':      200,
+            'max_depth':         5,
+            'learning_rate':     0.1,
+            'subsample':         0.8,
+            'colsample_bytree':  0.8,
+        },
     }
     
     @classmethod
@@ -158,14 +199,20 @@ class Config:
     @classmethod
     def get_input_shape_dict(cls, scenario, model_type=None):
         seq_len, num_features = cls.SCENARIOS[scenario][2]
+        flat = seq_len * num_features
         full = {
-            "CNN1D": (seq_len, num_features),
-            "MLP":   seq_len * num_features,
-            "LSTM":  (seq_len, num_features),
+            "CNN1D":   (seq_len, num_features),
+            "MLP":     flat,
+            "LSTM":    (seq_len, num_features),
+            # Classical models receive flattened input
+            "RF":      flat,
+            "SVM":     flat,
+            "XGBoost": flat,
         }
         if model_type:
             return {model_type: full[model_type]}
-        return full
+        # Default (no --nn): return only neural-network shapes
+        return {k: full[k] for k in ("CNN1D", "MLP", "LSTM")}
 
     @classmethod
     def get_feature_names(cls, scenario):

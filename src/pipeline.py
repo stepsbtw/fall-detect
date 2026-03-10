@@ -19,7 +19,7 @@ import optuna
 import optuna.visualization as vis
 import pandas as pd
 
-from utils import run_optuna, train, save_results, load_hyperparameters, load_test_data, create_model, plot_loss_curve
+from utils import run_optuna, train, save_results, save_results_classical, _make_classical_model, load_hyperparameters, load_test_data, create_model, plot_loss_curve
 from config import Config
 
 SCENARIO_CHOICES = [
@@ -92,7 +92,7 @@ def _save_study_results(base_out, scenario, model_type, study, best_params,
 def run_hyperparameter_search(args):
     """Run Optuna hyperparameter search and persist results."""
     scenario = args.scenario
-    model_type_arg = args.nn
+    model_type_arg = args.model
 
     Config.OPTUNA_CONFIG['n_trials'] = args.n_trials
     Config.OPTUNA_CONFIG['timeout'] = args.timeout
@@ -168,7 +168,7 @@ def _load_optuna_study(output_dir, study_name):
 def run_post_trials(args):
     """Load a completed Optuna study and persist best parameters + test data."""
     scenario = args.scenario
-    model_type_arg = args.nn
+    model_type_arg = args.model
 
     Config.OPTUNA_CONFIG['n_trials'] = args.n_trials
     Config.OPTUNA_CONFIG['timeout'] = args.timeout
@@ -211,7 +211,7 @@ def run_final_training(args):
     and re-splits the raw dataset, so training can run without a search step.
     """
     scenario = args.scenario
-    model_type_arg = args.nn
+    model_type_arg = args.model
     num_models = args.num_models
     epochs = args.epochs
 
@@ -260,6 +260,30 @@ def run_final_training(args):
         shuffle=False,
     )
 
+    # ── Classical models (RF / SVM / XGBoost) ──────────────────────────────
+    if model_type in Config.CLASSICAL_MODELS:
+        X_trainval_flat = X_trainval.reshape(len(X_trainval), -1)
+        X_test_flat     = X_test.reshape(len(X_test), -1)
+        for i in range(1, num_models + 1):
+            print(f"\nTreinando modelo final {i}/{num_models}...")
+            Config.set_seed(Config.FINAL_TRAINING['seed_offset'] + i)
+            clf = _make_classical_model(model_type, best_params, y_trainval)
+            clf.fit(X_trainval_flat, y_trainval)
+            model_dir = os.path.join(base_out, f"model_{i}")
+            os.makedirs(model_dir, exist_ok=True)
+            save_results_classical(
+                clf=clf,
+                X_test_flat=X_test_flat,
+                y_test=y_test,
+                decision_threshold=best_params.get("decision_threshold", 0.5),
+                i=i,
+                output_dir=model_dir,
+            )
+            print(f"Modelo {i} treinado e salvo em {model_dir}")
+        print(f"\nTreinamento final concluído! Resultados salvos em: {base_out}")
+        return
+
+    # ── Neural networks ───────────────────────────────────────────────────────────
     input_shape_dict = Config.get_input_shape_dict(scenario, model_type)
     input_shape = input_shape_dict[model_type]
 
@@ -347,7 +371,7 @@ def build_parser():
     # Shared scenario/nn arguments
     def add_common(p):
         p.add_argument("-scenario", required=True, choices=SCENARIO_CHOICES)
-        p.add_argument("--nn", required=False, choices=["CNN1D", "MLP", "LSTM"])
+        p.add_argument("--model", required=False, choices=["CNN1D", "MLP", "LSTM", "RF", "SVM", "XGBoost"])
 
     # --- search ---
     p_search = subparsers.add_parser("search", help="Run Optuna hyperparameter search")

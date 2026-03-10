@@ -1,4 +1,4 @@
-*/__pycache__
+/__pycache__
 /.venv
 /venv
 
@@ -6,13 +6,11 @@
 /dataset
 /labels_and_data
 
-builders/__pycache__
+/logs
 
-/output/
-/analise_global/
+*/__pycache__
+
+output/
+analise_global/
 
 Miniconda3-latest-Linux-x86_64.sh
-output/**/trial_*/*
-
-*.npz
-

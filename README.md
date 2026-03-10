@@ -6,15 +6,19 @@ Baseado no artigo (preprint) — A Machine Learning Approach to Automatic Fall D
 
 Além da adaptação, **Leave-One-Group-Out (LOGO) Cross Validation**, o modelo LSTM e a fusão de sensores foram implementados e testados junto aos demais.
 
-Suporta 3 arquiteturas de redes neurais, **CNN1D**, **MLP** e **LSTM**, com **otimização bayesiana de hiperparâmetros via Optuna**.
+Suporta **3 arquiteturas de redes neurais** (CNN1D, MLP, LSTM) e **3 modelos clássicos** (RF, SVM, XGBoost), com **otimização bayesiana de hiperparâmetros via Optuna** e suporte a parâmetros padrão sem busca prévia.
 
 ## Funcionalidades
 
-- **3 Arquiteturas de Redes Neurais**: CNN1D, MLP, LSTM
-- **Otimização Bayesiana**: Via Optuna com Early Stopping e Median Pruning
+- **3 Arquiteturas de Redes Neurais**: CNN1D, MLP, LSTM (PyTorch)
+- **3 Modelos Clássicos**: Random Forest (RF), SVM, XGBoost (scikit-learn / xgboost)
+- **Otimização Bayesiana**: Via Optuna com Early Stopping e Median Pruning; **F2-score (β=2)** como objetivo (ênfase em recall para detecção de quedas)
+- **Parâmetros Padrão**: Treinamento sem busca Optuna prévia com `DEFAULT_PARAMS` por modelo
+- **Tratamento de Desbalanceamento**: `CrossEntropyLoss` ponderada (redes neurais) e `class_weight='balanced'` / `scale_pos_weight` (modelos clássicos)
 - **6 Posições de Sensor**: individuais (chest, left, right) e fusões (chest\_left, chest\_right, chest\_left\_right)
 - **Domínio Temporal e de Frequência**: todos os cenários disponíveis nos dois domínios
-- **Validação Cruzada LOGO**: Leave-One-Group-Out por participante
+- **Validação Cruzada LOGO**: Leave-One-Group-Out por participante (12 folds sobre 12 indivíduos de treino/val; 3 indivíduos reservados para teste)
+- **Split por Indivíduo**: Separação treino/val e teste feita a nível de participante (sem vazamento de dados)
 - **Explicabilidade**: Análise SHAP
 - **Curvas de Aprendizado**: Análise de performance vs. quantidade de dados
 - **Análise Global**: Comparações entre modelos e cenários
@@ -76,50 +80,60 @@ O arquivo `src/config.py` centraliza todas as configurações:
 - **Dispositivo**: Seleção automática GPU/CPU
 - **Seed**: Reprodutibilidade (`SEED = 42`)
 - **Cenários**: Mapeamento posição → arquivo → shape de entrada
-- **Hiperparâmetros**: Ranges para otimização por arquitetura
+- **Hiperparâmetros**: Ranges para otimização por arquitetura (`MODEL_CONFIGS`)
+- **Parâmetros Padrão**: `DEFAULT_PARAMS` por modelo, usado quando não há busca Optuna
 - **Treinamento**: epochs, patience, batch\_size, etc.
-- **Split de dados**: 80% treino/val — 20% teste
+- **Split de dados**: 15 indivíduos — 3 reservados para teste (20% a nível de participante), 12 para LOGO (treino/val)
+- **Modelos clássicos**: `CLASSICAL_MODELS = {"RF", "SVM", "XGBoost"}`
 
 ## Pipeline de Treinamento (`pipeline.py`)
 
-Todos os comandos são executados a partir de `src/`:
+Todos os comandos são executados a partir de `src/`.
+
+Os modelos disponíveis são: `CNN1D`, `MLP`, `LSTM` (redes neurais) e `RF`, `SVM`, `XGBoost` (modelos clássicos).
 
 ### 1. Busca de Hiperparâmetros (Optuna)
 
 ```bash
-python pipeline.py search -scenario <SCENARIO> [--nn CNN1D|MLP|LSTM] [--n_trials 30] [--timeout 3600]
+python pipeline.py search -scenario <SCENARIO> --model <MODEL> [--n_trials 30] [--timeout 3600]
 ```
 
 ### 2. Análise Pós-Trials
 
 ```bash
-python pipeline.py post_trials -scenario <SCENARIO> [--nn CNN1D|MLP|LSTM]
+python pipeline.py post_trials -scenario <SCENARIO> --model <MODEL>
 ```
 
 ### 3. Treinamento Final
 
 ```bash
-python pipeline.py train -scenario <SCENARIO> [--nn CNN1D|MLP|LSTM] [--num_models 30] [--epochs 200]
+# Com resultados da busca Optuna (requer search previamente executado)
+python pipeline.py train -scenario <SCENARIO> --model <MODEL> [--num_models 30] [--epochs 200]
+
+# Sem busca prévia — usa DEFAULT_PARAMS do config.py
+python pipeline.py train -scenario <SCENARIO> --model <MODEL> [--num_models 10]
 ```
+
+> **Nota:** para modelos clássicos (RF, SVM, XGBoost), `--epochs` é ignorado.
 
 ## Pipeline de Análise (`analysis_pipeline.py`)
 
 ### SHAP — Importância de Features
 
 ```bash
-python analysis_pipeline.py shap -scenario <SCENARIO> --nn <NN> [--background_size 100] [--sample_size 200]
+python analysis_pipeline.py shap -scenario <SCENARIO> --model <MODEL> [--background_size 100] [--sample_size 200]
 ```
 
 ### Curva de Aprendizado
 
 ```bash
-python analysis_pipeline.py learning_curve -scenario <SCENARIO> --nn <NN> [--epochs 10]
+python analysis_pipeline.py learning_curve -scenario <SCENARIO> --model <MODEL> [--epochs 10]
 ```
 
 ### Agregar Métricas dos Modelos
 
 ```bash
-python analysis_pipeline.py aggregate -scenario <SCENARIO> --nn <NN>
+python analysis_pipeline.py aggregate -scenario <SCENARIO> --model <MODEL>
 ```
 
 ### Análise Global (todos os experimentos)
@@ -152,6 +166,7 @@ O nome do cenário segue o padrão `<posição>_T` (domínio temporal) ou `<posi
 ```
 fall-detect/
 ├── requirements.txt
+├── run.py                    # Script em lote: busca e/ou treino de todos os modelos/cenários
 ├── dataset/
 │   ├── 0_raw/               # Dados brutos (ID1..ID15 / CHEST, LEFT, RIGHT)
 │   ├── chest/data/ labels/  # Datasets gerados por posição
@@ -161,10 +176,10 @@ fall-detect/
 │   ├── chest_right/
 │   └── chest_left_right/
 └── src/
-    ├── config.py             # Configurações centralizadas
+    ├── config.py             # Configurações centralizadas (modelos, splits, DEFAULT_PARAMS)
     ├── pipeline.py           # CLI: search | post_trials | train
     ├── analysis_pipeline.py  # CLI: shap | learning_curve | aggregate | analyze
-    ├── utils.py              # Loop de treino, Optuna, métricas, visualizações
+    ├── utils.py              # Loop de treino, Optuna, métricas, visualizações, modelos clássicos
     ├── neural_networks.py    # Arquiteturas CNN1D, MLP, LSTM
     └── data/
         ├── generate_datasets.py       # Geração de datasets (sensores individuais)
@@ -175,22 +190,30 @@ fall-detect/
 
 ## Saídas Geradas
 
-As saídas são salvas em `output/<nn>/<scenario>/`:
+As saídas são salvas em `output/<model>/<scenario>/`:
 
 ### Busca de Hiperparâmetros
 - `optuna_study.db` — Banco SQLite do Optuna
 - `best_hyperparameters.json` — Melhores hiperparâmetros encontrados
-- `test_data.npz` — Split treino/val e teste
+- `test_data.npz` — Split treino/val e teste (por indivíduo)
 - `optuna_trials.csv` — Histórico de todos os trials
 - `param_importance.png/.html` — Importância dos hiperparâmetros
 
-### Treinamento Final
+### Treinamento Final — Redes Neurais (CNN1D, MLP, LSTM)
 - `model_X/model_X.pt` — Modelo salvo
 - `model_X/metrics_model_X.csv` — Métricas por modelo
 - `model_X/loss_curve_model_X.png` — Curva de loss
 - `model_X/confusion_matrix_model_X.png` — Matriz de confusão
 - `all_metrics.csv` / `summary_metrics.csv` — Métricas agregadas
 - `metrics_boxplot.png` — Boxplot das métricas
+
+### Treinamento Final — Modelos Clássicos (RF, SVM, XGBoost)
+- `model_X/model_X.pkl` — Modelo serializado (joblib)
+- `model_X/metrics_model_X.csv` — Métricas por modelo
+- `model_X/confusion_matrix_model_X.png` — Matriz de confusão
+- `model_X/roc_curve_model_X.png` — Curva ROC
+- `model_X/classification_report_model_X.txt` — Relatório de classificação
+- `all_metrics.csv` / `summary_metrics.csv` — Métricas agregadas
 
 ### Análise SHAP
 - `shap_values_*.npy` — Valores SHAP
@@ -202,29 +225,74 @@ As saídas são salvas em `output/<nn>/<scenario>/`:
 ### Análise Global (`analise_global/`)
 - Boxplots, curvas ROC, matrizes de confusão, curvas de aprendizado e importância de features comparados entre todos os experimentos
 
+## Script em Lote (`run.py`)
+
+O `run.py` executa busca e/ou treinamento para todos os modelos e cenários de uma vez.
+
+```bash
+# Treinar tudo com DEFAULT_PARAMS (sem busca)
+python run.py
+
+# Busca de hiperparâmetros + treinamento, todos os combos
+python run.py --search --train
+
+# Apenas busca, um modelo, todos os cenários
+python run.py --search --model RF
+
+# Busca + treino, um combo específico
+python run.py --search --train --model CNN1D --scenario chest_T
+
+# Configurações customizadas
+python run.py --search --train --model LSTM --n_trials 50 --num_models 20 --epochs 300
+```
+
+| Opção | Padrão | Descrição |
+|---|---|---|
+| `--search` | — | Executa busca Optuna |
+| `--train` | — | Executa treinamento final (padrão se nenhuma flag for passada) |
+| `--model` | todos | Filtra um modelo específico |
+| `--scenario` | todos | Filtra um cenário específico |
+| `--n_trials` | 30 | Número de trials Optuna |
+| `--num_models` | 30 | Número de modelos treinados |
+| `--epochs` | 200 | Épocas de treino (ignorado para RF/SVM/XGBoost) |
+
+Logs são salvos em `logs/<model>_<scenario>_{search,train}.log`.
+
 ## Exemplo de Fluxo Completo
 
 ```bash
 cd src
 
+# --- Rede Neural (CNN1D) ---
+
 # 1. Busca de hiperparâmetros
-python pipeline.py search -scenario chest_T --nn CNN1D --n_trials 30
+python pipeline.py search -scenario chest_T --model CNN1D --n_trials 30
 
 # 2. Relatório pós-trials
-python pipeline.py post_trials -scenario chest_T --nn CNN1D
+python pipeline.py post_trials -scenario chest_T --model CNN1D
 
 # 3. Treinamento final
-python pipeline.py train -scenario chest_T --nn CNN1D --num_models 30
+python pipeline.py train -scenario chest_T --model CNN1D --num_models 30
 
 # 4. SHAP
-python analysis_pipeline.py shap -scenario chest_T --nn CNN1D
+python analysis_pipeline.py shap -scenario chest_T --model CNN1D
 
 # 5. Curva de aprendizado
-python analysis_pipeline.py learning_curve -scenario chest_T --nn CNN1D
+python analysis_pipeline.py learning_curve -scenario chest_T --model CNN1D
 
 # 6. Agregar métricas
-python analysis_pipeline.py aggregate -scenario chest_T --nn CNN1D
+python analysis_pipeline.py aggregate -scenario chest_T --model CNN1D
 
-# 7. Análise global
+# --- Modelo Clássico (Random Forest) ---
+
+# Com busca de hiperparâmetros
+python pipeline.py search -scenario chest_T --model RF --n_trials 30
+python pipeline.py train -scenario chest_T --model RF --num_models 10
+
+# Sem busca prévia (usa DEFAULT_PARAMS)
+python pipeline.py train -scenario chest_T --model RF --num_models 10
+
+# --- Análise Global (todos os experimentos) ---
+
 python analysis_pipeline.py analyze
 ```

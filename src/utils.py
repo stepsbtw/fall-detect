@@ -24,6 +24,10 @@ import optuna.visualization as vis
 import random
 from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.metrics import f1_score, fbeta_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from xgboost import XGBClassifier
+import joblib
 import json
 import seaborn as sns
 from config import Config
@@ -141,8 +145,12 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
 
     # Sugerir hiperparâmetros
     model_type = restrict_model_type if restrict_model_type else trial.suggest_categorical("model_type", ["CNN1D", "MLP", "LSTM"])
-    dropout = trial.suggest_float('dropout', Config.METRICS_CONFIG['dropout_range'][0], Config.METRICS_CONFIG['dropout_range'][1], step=Config.METRICS_CONFIG['dropout_step'])
-    learning_rate = trial.suggest_float('learning_rate', Config.OPTIMIZER_CONFIG['lr_range'][0], Config.OPTIMIZER_CONFIG['lr_range'][1], log=Config.OPTIMIZER_CONFIG['lr_log'])
+    is_classical = model_type in Config.CLASSICAL_MODELS
+
+    # Dropout and learning_rate are only meaningful for neural networks
+    if not is_classical:
+        dropout = trial.suggest_float('dropout', Config.METRICS_CONFIG['dropout_range'][0], Config.METRICS_CONFIG['dropout_range'][1], step=Config.METRICS_CONFIG['dropout_step'])
+        learning_rate = trial.suggest_float('learning_rate', Config.OPTIMIZER_CONFIG['lr_range'][0], Config.OPTIMIZER_CONFIG['lr_range'][1], log=Config.OPTIMIZER_CONFIG['lr_log'])
     decision_threshold = trial.suggest_float('decision_threshold', Config.METRICS_CONFIG['decision_threshold_range'][0], Config.METRICS_CONFIG['decision_threshold_range'][1], step=Config.METRICS_CONFIG['decision_threshold_step'])
 
     f2_scores = []
@@ -161,130 +169,182 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
         X_train, X_val = X_trainval[train_idx], X_trainval[val_idx]
         y_train, y_val = y_trainval[train_idx], y_trainval[val_idx]
 
-        batch_size = Config.TRAINING_CONFIG['batch_size']
-
-        # Criar modelo baseado no tipo
-        if model_type == "CNN1D":
-            cnn_config = Config.MODEL_CONFIGS['CNN1D']
-            filter_size = trial.suggest_int("filter_size", cnn_config['filter_size_range'][0], cnn_config['filter_size_range'][1], log=True)
-            kernel_size = trial.suggest_int("kernel_size", cnn_config['kernel_size_range'][0], cnn_config['kernel_size_range'][1])
-            num_layers = trial.suggest_int("num_layers", cnn_config['num_layers_range'][0], cnn_config['num_layers_range'][1])
-            num_dense = trial.suggest_int("num_dense_layers", cnn_config['num_dense_layers_range'][0], cnn_config['num_dense_layers_range'][1])
-            dense_neurons = trial.suggest_int("dense_neurons", cnn_config['dense_neurons_range'][0], cnn_config['dense_neurons_range'][1], log=True)
-
-            # Prune se convolução reduz demais
-            max_seq_len = input_shape_dict["CNN1D"][0]
-            reduced_seq_len = max_seq_len // (2 ** num_layers)
-            if reduced_seq_len <= kernel_size:
-                raise optuna.exceptions.TrialPruned()
-    
-            model = CNN1DNet(input_shape_dict["CNN1D"], filter_size, kernel_size, num_layers, num_dense, dense_neurons, dropout, num_labels)
-
-        elif model_type == "MLP":
-            mlp_config = Config.MODEL_CONFIGS['MLP']
-            num_layers = trial.suggest_int("num_layers", mlp_config['num_layers_range'][0], mlp_config['num_layers_range'][1])
-    
-            max_dense = min(mlp_config['dense_neurons_range'][1], max(mlp_config['dense_neurons_range'][0], input_shape_dict["MLP"] // 4))
-            dense_neurons = trial.suggest_int("dense_neurons", mlp_config['dense_neurons_range'][0], max_dense, log=True)
-            model = MLPNet(input_dim=input_shape_dict["MLP"], num_layers=num_layers, dense_neurons=dense_neurons, dropout=dropout, number_of_labels=num_labels)
-
-        elif model_type == "LSTM":
-            lstm_config = Config.MODEL_CONFIGS['LSTM']
-            hidden_dim = trial.suggest_int("hidden_dim", lstm_config['hidden_dim_range'][0], lstm_config['hidden_dim_range'][1], log=True)
-            num_layers = trial.suggest_int("num_layers", lstm_config['num_layers_range'][0], lstm_config['num_layers_range'][1])
-            model = LSTMNet(input_dim=input_shape_dict["LSTM"][1], hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout, number_of_labels=num_labels)
-
-        model.to(device)
-        
-        # Usar múltiplas GPUs se disponível
-        if torch.cuda.device_count() > 1:
-            print(f"Usando {torch.cuda.device_count()} GPUs com DataParallel")
-            model = torch.nn.DataParallel(model)
-            # Ajustar batch size para múltiplas GPUs
-            batch_size = batch_size * torch.cuda.device_count()
-            print(f"Batch size ajustado para {batch_size} (batch_size * num_gpus)")
-        
-        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        # Weighted loss: penalise missing falls (minority class) more than false alarms
         y_train_flat = np.argmax(y_train, axis=1) if len(y_train.shape) > 1 else y_train
-        class_counts = np.bincount(y_train_flat, minlength=2)
-        class_weights = len(y_train_flat) / (2 * class_counts.astype(float))
-        weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
-        criterion = torch.nn.CrossEntropyLoss(weight=weight_tensor)
-
-        # Preparar data loaders
-        train_loader = torch.utils.data.DataLoader(
-            torch.utils.data.TensorDataset(
-                torch.tensor(X_train, dtype=torch.float32),
-                torch.tensor(np.argmax(y_train, axis=1) if len(y_train.shape) > 1 else y_train, dtype=torch.long)
-            ),
-            batch_size=batch_size, 
-            shuffle=Config.TRAINING_CONFIG['shuffle'], 
-            pin_memory=Config.TRAINING_CONFIG['pin_memory'], 
-            num_workers=Config.TRAINING_CONFIG['num_workers']
-        )
-
-        val_loader = torch.utils.data.DataLoader(
-            torch.utils.data.TensorDataset(
-                torch.tensor(X_val, dtype=torch.float32),
-                torch.tensor(np.argmax(y_val, axis=1) if len(y_val.shape) > 1 else y_val, dtype=torch.long)
-            ),
-            batch_size=batch_size, 
-            pin_memory=Config.TRAINING_CONFIG['pin_memory'], 
-            num_workers=Config.TRAINING_CONFIG['num_workers']
-        )
-
-        # Treinar modelo com pruning intermediário
-        y_pred, y_true, val_losses, train_losses = train(
-            model, train_loader, val_loader, optimizer, criterion, device,
-            epochs=Config.TRAINING_CONFIG['epochs'], 
-            early_stopping=Config.TRAINING_CONFIG['early_stopping'], 
-            patience=Config.TRAINING_CONFIG['patience'], 
-            trial=trial,
-            step_offset=fold_idx * Config.TRAINING_CONFIG['epochs']
-        )
-
-        all_train_losses.append(train_losses)
-        all_val_losses.append(val_losses)
-
-        # Salvar resultados do fold
-        fold_dir = os.path.join(output_dir, f"trial_{trial.number}")
+        y_val_flat   = np.argmax(y_val,   axis=1) if len(y_val.shape)   > 1 else y_val
+        fall_class   = Config.METRICS_CONFIG['fall_class']
+        fold_dir     = os.path.join(output_dir, f"trial_{trial.number}")
         os.makedirs(fold_dir, exist_ok=True)
 
-        plot_loss_curve(train_losses, val_losses, fold_dir, f"{trial.number}fold{fold_idx + 1}")
+        if is_classical:
+            # ── Classical model (RF / SVM / XGBoost) ───────────────────────────
+            X_train_flat = X_train.reshape(len(X_train), -1)
+            X_val_flat   = X_val.reshape(len(X_val),   -1)
 
-        save_results(
-            model=model,
-            val_loader=val_loader,
-            y_val_onehot=y_val,
-            i=f"{trial.number}fold{fold_idx + 1}",
-            decision_threshold=decision_threshold,
-            output_dir=fold_dir,
-            device=device
-        )
+            if model_type == "RF":
+                rf_cfg = Config.MODEL_CONFIGS['RF']
+                n_estimators      = trial.suggest_int("n_estimators",      rf_cfg['n_estimators_range'][0],      rf_cfg['n_estimators_range'][1],      log=True)
+                max_depth         = trial.suggest_int("max_depth",         rf_cfg['max_depth_range'][0],         rf_cfg['max_depth_range'][1])
+                min_samples_split = trial.suggest_int("min_samples_split", rf_cfg['min_samples_split_range'][0], rf_cfg['min_samples_split_range'][1])
+                clf = RandomForestClassifier(
+                    n_estimators=n_estimators, max_depth=max_depth,
+                    min_samples_split=min_samples_split,
+                    class_weight='balanced', random_state=Config.SEED + fold_idx, n_jobs=-1,
+                )
+            elif model_type == "SVM":
+                svm_cfg = Config.MODEL_CONFIGS['SVM']
+                C      = trial.suggest_float("C",      svm_cfg['C_range'][0], svm_cfg['C_range'][1], log=True)
+                kernel = trial.suggest_categorical("kernel", svm_cfg['kernel_choices'])
+                clf = SVC(C=C, kernel=kernel, probability=True,
+                          class_weight='balanced', random_state=Config.SEED + fold_idx)
+            elif model_type == "XGBoost":
+                xgb_cfg          = Config.MODEL_CONFIGS['XGBoost']
+                n_estimators     = trial.suggest_int("n_estimators",  xgb_cfg['n_estimators_range'][0],    xgb_cfg['n_estimators_range'][1],    log=True)
+                max_depth        = trial.suggest_int("max_depth",      xgb_cfg['max_depth_range'][0],       xgb_cfg['max_depth_range'][1])
+                learning_rate_xg = trial.suggest_float("learning_rate", xgb_cfg['learning_rate_range'][0], xgb_cfg['learning_rate_range'][1],   log=True)
+                subsample        = trial.suggest_float("subsample",     xgb_cfg['subsample_range'][0],      xgb_cfg['subsample_range'][1])
+                colsample_bytree = trial.suggest_float("colsample_bytree", xgb_cfg['colsample_bytree_range'][0], xgb_cfg['colsample_bytree_range'][1])
+                scale_pos_weight = int((y_train_flat == 0).sum()) / max(int((y_train_flat == 1).sum()), 1)
+                clf = XGBClassifier(
+                    n_estimators=n_estimators, max_depth=max_depth,
+                    learning_rate=learning_rate_xg, subsample=subsample,
+                    colsample_bytree=colsample_bytree, scale_pos_weight=scale_pos_weight,
+                    eval_metric='logloss', random_state=Config.SEED + fold_idx, n_jobs=-1,
+                )
 
-        # Calcular F2-score (beta=2 weights recall 2x over precision — missing a fall is costly)
-        fall_class = Config.METRICS_CONFIG['fall_class']
-        y_probs = []
-        model.eval()
-        with torch.no_grad():
-            for xb, _ in val_loader:
-                xb = xb.to(device)
-                out = model(xb)
-                probs = F.softmax(out, dim=1)[:, 1].cpu().numpy()
-                y_probs.extend(probs)
-        y_pred_thresh = (np.array(y_probs) >= decision_threshold).astype(int)
-        f2 = fbeta_score(y_true, y_pred_thresh, beta=2, pos_label=fall_class, zero_division=0)
+            clf.fit(X_train_flat, y_train_flat)
+            save_results_classical(clf, X_val_flat, y_val_flat, decision_threshold,
+                                   f"{trial.number}fold{fold_idx + 1}", fold_dir)
 
-        f2_scores.append(f2)
+            y_probs_cl    = clf.predict_proba(X_val_flat)
+            y_pred_thresh = (y_probs_cl[:, 1] >= decision_threshold).astype(int)
+            f2 = fbeta_score(y_val_flat, y_pred_thresh, beta=2, pos_label=fall_class, zero_division=0)
+            f2_scores.append(f2)
 
-        # Pruning check após cada fold
-        if trial.should_prune():
-            raise optuna.exceptions.TrialPruned()
+            # Report fold-level metric for pruner (inverted: lower = better)
+            trial.report(1.0 - f2, fold_idx)
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
 
-        del model
-        del optimizer
-        torch.cuda.empty_cache()
+        else:
+            # ── Neural network path ──────────────────────────────────────────────
+            batch_size = Config.TRAINING_CONFIG['batch_size']
+
+            # Criar modelo baseado no tipo
+            if model_type == "CNN1D":
+                cnn_config = Config.MODEL_CONFIGS['CNN1D']
+                filter_size = trial.suggest_int("filter_size", cnn_config['filter_size_range'][0], cnn_config['filter_size_range'][1], log=True)
+                kernel_size = trial.suggest_int("kernel_size", cnn_config['kernel_size_range'][0], cnn_config['kernel_size_range'][1])
+                num_layers = trial.suggest_int("num_layers", cnn_config['num_layers_range'][0], cnn_config['num_layers_range'][1])
+                num_dense = trial.suggest_int("num_dense_layers", cnn_config['num_dense_layers_range'][0], cnn_config['num_dense_layers_range'][1])
+                dense_neurons = trial.suggest_int("dense_neurons", cnn_config['dense_neurons_range'][0], cnn_config['dense_neurons_range'][1], log=True)
+
+                # Prune se convolução reduz demais
+                max_seq_len = input_shape_dict["CNN1D"][0]
+                reduced_seq_len = max_seq_len // (2 ** num_layers)
+                if reduced_seq_len <= kernel_size:
+                    raise optuna.exceptions.TrialPruned()
+
+                model = CNN1DNet(input_shape_dict["CNN1D"], filter_size, kernel_size, num_layers, num_dense, dense_neurons, dropout, num_labels)
+
+            elif model_type == "MLP":
+                mlp_config = Config.MODEL_CONFIGS['MLP']
+                num_layers = trial.suggest_int("num_layers", mlp_config['num_layers_range'][0], mlp_config['num_layers_range'][1])
+    
+                max_dense = min(mlp_config['dense_neurons_range'][1], max(mlp_config['dense_neurons_range'][0], input_shape_dict["MLP"] // 4))
+                dense_neurons = trial.suggest_int("dense_neurons", mlp_config['dense_neurons_range'][0], max_dense, log=True)
+                model = MLPNet(input_dim=input_shape_dict["MLP"], num_layers=num_layers, dense_neurons=dense_neurons, dropout=dropout, number_of_labels=num_labels)
+
+            elif model_type == "LSTM":
+                lstm_config = Config.MODEL_CONFIGS['LSTM']
+                hidden_dim = trial.suggest_int("hidden_dim", lstm_config['hidden_dim_range'][0], lstm_config['hidden_dim_range'][1], log=True)
+                num_layers = trial.suggest_int("num_layers", lstm_config['num_layers_range'][0], lstm_config['num_layers_range'][1])
+                model = LSTMNet(input_dim=input_shape_dict["LSTM"][1], hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout, number_of_labels=num_labels)
+
+            model.to(device)
+            
+            # Usar múltiplas GPUs se disponível
+            if torch.cuda.device_count() > 1:
+                print(f"Usando {torch.cuda.device_count()} GPUs com DataParallel")
+                model = torch.nn.DataParallel(model)
+                # Ajustar batch size para múltiplas GPUs
+                batch_size = batch_size * torch.cuda.device_count()
+                print(f"Batch size ajustado para {batch_size} (batch_size * num_gpus)")
+            
+            optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+            # Weighted loss: penalise missing falls (minority class) more than false alarms
+            class_counts = np.bincount(y_train_flat, minlength=2)
+            class_weights = len(y_train_flat) / (2 * class_counts.astype(float))
+            weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+            criterion = torch.nn.CrossEntropyLoss(weight=weight_tensor)
+
+            # Preparar data loaders
+            train_loader = torch.utils.data.DataLoader(
+                torch.utils.data.TensorDataset(
+                    torch.tensor(X_train, dtype=torch.float32),
+                    torch.tensor(y_train_flat, dtype=torch.long)
+                ),
+                batch_size=batch_size, 
+                shuffle=Config.TRAINING_CONFIG['shuffle'], 
+                pin_memory=Config.TRAINING_CONFIG['pin_memory'], 
+                num_workers=Config.TRAINING_CONFIG['num_workers']
+            )
+
+            val_loader = torch.utils.data.DataLoader(
+                torch.utils.data.TensorDataset(
+                    torch.tensor(X_val, dtype=torch.float32),
+                    torch.tensor(y_val_flat, dtype=torch.long)
+                ),
+                batch_size=batch_size, 
+                pin_memory=Config.TRAINING_CONFIG['pin_memory'], 
+                num_workers=Config.TRAINING_CONFIG['num_workers']
+            )
+
+            # Treinar modelo com pruning intermediário
+            y_pred, y_true, val_losses, train_losses = train(
+                model, train_loader, val_loader, optimizer, criterion, device,
+                epochs=Config.TRAINING_CONFIG['epochs'], 
+                early_stopping=Config.TRAINING_CONFIG['early_stopping'], 
+                patience=Config.TRAINING_CONFIG['patience'], 
+                trial=trial,
+                step_offset=fold_idx * Config.TRAINING_CONFIG['epochs']
+            )
+
+            all_train_losses.append(train_losses)
+            all_val_losses.append(val_losses)
+
+            plot_loss_curve(train_losses, val_losses, fold_dir, f"{trial.number}fold{fold_idx + 1}")
+
+            save_results(
+                model=model,
+                val_loader=val_loader,
+                y_val_onehot=y_val,
+                i=f"{trial.number}fold{fold_idx + 1}",
+                decision_threshold=decision_threshold,
+                output_dir=fold_dir,
+                device=device
+            )
+
+            # Calcular F2-score (beta=2 weights recall 2x over precision — missing a fall is costly)
+            y_probs = []
+            model.eval()
+            with torch.no_grad():
+                for xb, _ in val_loader:
+                    xb = xb.to(device)
+                    out = model(xb)
+                    probs = F.softmax(out, dim=1)[:, 1].cpu().numpy()
+                    y_probs.extend(probs)
+            y_pred_thresh = (np.array(y_probs) >= decision_threshold).astype(int)
+            f2 = fbeta_score(y_true, y_pred_thresh, beta=2, pos_label=fall_class, zero_division=0)
+
+            f2_scores.append(f2)
+
+            # Pruning check após cada fold
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
+
+            del model
+            del optimizer
+            torch.cuda.empty_cache()
 
     mean_f2 = np.mean(f2_scores)
     print(f"Trial {trial.number} - Média F2 (fall): {mean_f2:.4f}")
@@ -296,14 +356,13 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
     summary = {
         "trial_number": trial.number,
         "model_type": model_type,
-        "params": {
-            "dropout": dropout,
-            "learning_rate": learning_rate,
-            "decision_threshold": decision_threshold
-        },
+        "params": {"decision_threshold": decision_threshold},
         "mean_f2": float(mean_f2),
         "f2_scores": f2_scores
     }
+
+    if not is_classical:
+        summary["params"].update({"dropout": dropout, "learning_rate": learning_rate})
 
     if model_type == "CNN1D":
         summary["params"].update({
@@ -322,6 +381,22 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
         summary["params"].update({
             "hidden_dim": hidden_dim,
             "num_layers": num_layers
+        })
+    elif model_type == "RF":
+        summary["params"].update({
+            "n_estimators": n_estimators,
+            "max_depth": max_depth,
+            "min_samples_split": min_samples_split,
+        })
+    elif model_type == "SVM":
+        summary["params"].update({"C": C, "kernel": kernel})
+    elif model_type == "XGBoost":
+        summary["params"].update({
+            "n_estimators": n_estimators,
+            "max_depth": max_depth,
+            "learning_rate": learning_rate_xg,
+            "subsample": subsample,
+            "colsample_bytree": colsample_bytree,
         })
 
     with open(os.path.join(trial_dir, "trial_summary.json"), "w") as f:
@@ -433,9 +508,76 @@ def save_results(model, val_loader, y_val_onehot, i, decision_threshold, output_
     metrics = calculate_metrics(tp, tn, fp, fn, y_true, y_pred)
     record_metrics(metrics, tp, tn, fp, fn, i, output_dir)
 
-# =============================================================================
-# VISUALIZAÇÕES
-# =============================================================================
+
+def save_results_classical(clf, X_test_flat, y_test, decision_threshold, i, output_dir):
+    """
+    Salva resultados completos para modelos clássicos (sklearn / XGBoost).
+    Interface espelha save_results para que o pipeline trate ambos os tipos
+    de forma uniforme.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 1. Salvar modelo
+    joblib.dump(clf, os.path.join(output_dir, f"model_{i}.pkl"))
+
+    # 2. Predição
+    y_probs = clf.predict_proba(X_test_flat)
+    y_pred  = (y_probs[:, 1] >= decision_threshold).astype(int)
+    y_true  = y_test
+
+    # 3. Confusion matrix
+    cm = confusion_matrix(y_true, y_pred)
+    tn, fp, fn, tp = cm.ravel()
+    plot_confusion_matrix(cm, output_dir, i)
+
+    # 4. Classification report
+    save_classification_report(y_pred, y_true, output_dir, i)
+
+    # 5. ROC curve
+    plot_roc_curve(y_probs[:, 1], y_true, output_dir, i)
+
+    # 6. Métricas
+    metrics = calculate_metrics(tp, tn, fp, fn, y_true, y_pred)
+    record_metrics(metrics, tp, tn, fp, fn, i, output_dir)
+
+
+def _make_classical_model(model_type, params, y_train):
+    """
+    Instancia um classificador clássico a partir de um dict de parâmetros.
+    y_train é usado apenas para calcular scale_pos_weight do XGBoost.
+    """
+    if model_type == "RF":
+        return RandomForestClassifier(
+            n_estimators=int(params.get("n_estimators", 200)),
+            max_depth=int(params.get("max_depth", 10)),
+            min_samples_split=int(params.get("min_samples_split", 5)),
+            class_weight="balanced",
+            random_state=Config.SEED,
+            n_jobs=-1,
+        )
+    elif model_type == "SVM":
+        return SVC(
+            C=float(params.get("C", 1.0)),
+            kernel=params.get("kernel", "rbf"),
+            probability=True,
+            class_weight="balanced",
+            random_state=Config.SEED,
+        )
+    elif model_type == "XGBoost":
+        scale_pos_weight = int((y_train == 0).sum()) / max(int((y_train == 1).sum()), 1)
+        return XGBClassifier(
+            n_estimators=int(params.get("n_estimators", 200)),
+            max_depth=int(params.get("max_depth", 5)),
+            learning_rate=float(params.get("learning_rate", 0.1)),
+            subsample=float(params.get("subsample", 0.8)),
+            colsample_bytree=float(params.get("colsample_bytree", 0.8)),
+            scale_pos_weight=scale_pos_weight,
+            eval_metric="logloss",
+            random_state=Config.SEED,
+            n_jobs=-1,
+        )
+    else:
+        raise ValueError(f"Unknown classical model type: {model_type}")
 
 def plot_confusion_matrix(cm, output_dir, i):
     """
