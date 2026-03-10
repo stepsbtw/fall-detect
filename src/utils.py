@@ -22,7 +22,7 @@ import csv
 from neural_networks import CNN1DNet, MLPNet, LSTMNet
 import optuna.visualization as vis
 import random
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.metrics import f1_score
 import json
 import seaborn as sns
@@ -133,7 +133,7 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
 # OTIMIZAÇÃO COM OPTUNA
 # =============================================================================
 
-def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_labels, device, restrict_model_type=None):
+def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_dir, num_labels, device, restrict_model_type=None):
     """
     Função objetivo para otimização com Optuna
     """
@@ -149,11 +149,11 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
     all_train_losses = []
     all_val_losses = []
 
-    # Cross-validation usando configurações do Config
-    skf = StratifiedKFold(n_splits=Config.CV_CONFIG['n_splits'], shuffle=Config.CV_CONFIG['shuffle'], random_state=Config.CV_CONFIG['random_state'])
+    logo = LeaveOneGroupOut()
+    n_folds = logo.get_n_splits(groups=groups)
 
-    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_trainval, y_trainval.argmax(axis=1) if len(y_trainval.shape) > 1 else y_trainval)):
-        print(f"\n Fold {fold_idx + 1}/{skf.get_n_splits()} ({model_type})")
+    for fold_idx, (train_idx, val_idx) in enumerate(logo.split(X_trainval, y_trainval, groups)):
+        print(f"\n Fold {fold_idx + 1}/{n_folds} — left-out group {groups[val_idx[0]]} ({model_type})")
 
         # Definir seeds para reprodutibilidade
         Config.set_seed(Config.SEED + fold_idx)
@@ -326,10 +326,11 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, output_dir, num_l
 
     return mean_mcc
 
-def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels, device, study_name, restrict_model_type=None):
+def run_optuna(input_shape_dict, X_trainval, y_trainval, groups, output_dir, num_labels, device, study_name, restrict_model_type=None):
     """
-    Executa otimização com Optuna
+    Executa otimização com Optuna usando Leave-One-Group-Out CV
     """
+    os.makedirs(output_dir, exist_ok=True)
     db_path = os.path.join(output_dir, "optuna_study.db")
     storage_url = f"sqlite:///{db_path}"
 
@@ -357,6 +358,7 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, output_dir, num_labels,
         input_shape_dict,
         X_trainval,
         y_trainval,
+        groups,
         output_dir,
         num_labels,
         device,

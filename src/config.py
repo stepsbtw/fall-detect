@@ -3,126 +3,79 @@ import torch
 import numpy as np
 
 class Config:
-    """Configurações centralizadas para o projeto de detecção de quedas"""
-    
-    # ----------------------------- #
-    #          Dispositivo          #
-    # ----------------------------- #
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Configurações CUDA
     TORCH_BACKENDS = {
         'cudnn_deterministic': False,
         'cudnn_benchmark': True,
         'cuda_matmul_allow_tf32': True,
         'cudnn_allow_tf32': True
     }
-    
-    # ----------------------------- #
-    #   Seeds (Reprodutibilidade)   #
-    # ----------------------------- #
     SEED = 42
-    
-    # ----------------------------- #
-    #         Diretórios            #
-    # ----------------------------- #
     ROOT_DIR = os.path.dirname(__file__)
-    DATA_PATH = os.path.join(ROOT_DIR, "labels_and_data", "data")
-    LABEL_PATH = os.path.join(ROOT_DIR, "labels_and_data", "labels")
-    OUTPUT_PATH = os.path.join(ROOT_DIR, "output")
-    
-    # ----------------------------- #
-    #         Cenários              #
-    # ----------------------------- #
+    DATA_PATH = os.path.normpath(os.path.join(ROOT_DIR, "..", "dataset"))
+    NUM_LABELS = 2
+
+    # [directory_name, filename, (seq_len, num_features)]
     SCENARIOS = {
-        "Sc1_acc_T": ['magacc_time_domain_data_array.npy', (1020, 1)],
-        "Sc1_gyr_T": ['maggyr_time_domain_data_array.npy', (1020, 1)],
-        "Sc1_acc_F": ['magacc_frequency_domain_data_array.npy', (510, 1)],
-        "Sc1_gyr_F": ['maggyr_frequency_domain_data_array.npy', (510, 1)],
-        "Sc_2_acc_T": ['acc_x_y_z_axes_time_domain_data_array.npy', (1020, 3)],
-        "Sc_2_gyr_T": ['gyr_x_y_z_axes_time_domain_data_array.npy', (1020, 3)],
-        "Sc_2_acc_F": ['acc_x_y_z_axes_frequency_domain_data_array.npy', (510, 3)],
-        "Sc_2_gyr_F": ['gyr_x_y_z_axes_frequency_domain_data_array.npy', (510, 3)],
-        "Sc_3_T": ['magacc_and_maggyr_time_domain_data_array.npy', (1020, 2)],
-        "Sc_3_F": ['magacc_and_maggyr_frequency_domain_data_array.npy', (510, 2)],
-        "Sc_4_T": ['acc_and_gyr_three_axes_time_domain_data_array.npy', (1020, 6)],
-        "Sc_4_F": ['acc_and_gyr_three_axes_frequency_domain_data_array.npy', (510, 6)],
+        "chest_T":            ["chest",            "data_time_domain.npy",      (1100, 8)],
+        "chest_F":            ["chest",            "data_frequency_domain.npy", (550,  8)],
+        "left_T":             ["left",             "data_time_domain.npy",      (460,  8)],
+        "left_F":             ["left",             "data_frequency_domain.npy", (230,  8)],
+        "right_T":            ["right",            "data_time_domain.npy",      (460,  8)],
+        "right_F":            ["right",            "data_frequency_domain.npy", (230,  8)],
+        "chest_left_T":       ["chest_left",       "data_time_domain.npy",      (460, 16)],
+        "chest_left_F":       ["chest_left",       "data_frequency_domain.npy", (230, 16)],
+        "chest_right_T":      ["chest_right",      "data_time_domain.npy",      (460, 16)],
+        "chest_right_F":      ["chest_right",      "data_frequency_domain.npy", (230, 16)],
+        "chest_left_right_T": ["chest_left_right", "data_time_domain.npy",      (460, 24)],
+        "chest_left_right_F": ["chest_left_right", "data_frequency_domain.npy", (230, 24)],
     }
-    
-    # ----------------------------- #
-    #         Labels                #
-    # ----------------------------- #
-    LABELS_DICT = {
-        "multiple_one": "multiple_class_label_1.npy",
-        "multiple_two": "multiple_class_label_2.npy",
-        "binary_one": "binary_class_label_1.npy",
-        "binary_two": "binary_class_label_2.npy",
-    }
-    
-    # ----------------------------- #
-    #     Hiperparâmetros Optuna    #
-    # ----------------------------- #
+
     OPTUNA_CONFIG = {
-        'n_trials': 20, # 50
-        #'timeout': 3600,  # 1 hora
-        'n_jobs': 1
+        'n_trials': 30,
+        'n_jobs': 1,
     }
     
-    # ----------------------------- #
-    #     Treinamento              #
-    # ----------------------------- #
     TRAINING_CONFIG = {
-        'epochs': 25,
+        'epochs': 500,
         'early_stopping': True,
-        'patience': 5,
+        'patience': 30,
         'batch_size': 32,
-        'num_workers': 6,
+        'num_workers': 0,
         'pin_memory': True,
-        'shuffle': True
+        'shuffle': True,
     }
-    
-    # ----------------------------- #
-    #     Otimização               #
-    # ----------------------------- #
+
     OPTIMIZER_CONFIG = {
         'name': 'Adam',
         'lr_range': (1e-4, 1e-2),
         'lr_log': True
     }
-    
-    # ----------------------------- #
-    #     Cross-Validation         #
-    # ----------------------------- #
+
     CV_CONFIG = {
-        'n_splits': 5,
+        'n_splits': 5,   # only used as fallback; LOGO ignores this
         'shuffle': True,
-        'random_state': 42
+        'random_state': 42,
     }
-    
-    # ----------------------------- #
-    #     Modelos                  #
-    # ----------------------------- #
+
     MODEL_CONFIGS = {
         'CNN1D': {
-            'filter_size_range': (16, 128),
-            'kernel_size_range': (3, 7),
-            'num_layers_range': (2, 4),
-            'num_dense_layers_range': (1, 2),
-            'dense_neurons_range': (64, 512)
+            'num_layers_range':       (1,  4),
+            'filter_size_range':      (16, 128),
+            'kernel_size_range':      (3,  9),
+            'num_dense_layers_range': (1,  3),
+            'dense_neurons_range':    (32, 256),
         },
         'MLP': {
-            'num_layers_range': (1, 4),
-            'dense_neurons_range': (64, 1024)
+            'num_layers_range':    (1,  5),
+            'dense_neurons_range': (32, 512),
         },
         'LSTM': {
-            'hidden_dim_range': (64, 256),
-            'num_layers_range': (1, 3)
-        }
+            'num_layers_range': (1,  3),
+            'hidden_dim_range': (32, 256),
+        },
     }
     
-    # ----------------------------- #
-    #     Métricas                 #
-    # ----------------------------- #
     METRICS_CONFIG = {
         'decision_threshold_range': (0.5, 0.9),
         'decision_threshold_step': 0.1,
@@ -130,19 +83,13 @@ class Config:
         'dropout_step': 0.1
     }
     
-    # ----------------------------- #
-    #     Data Split               #
-    # ----------------------------- #
     DATA_SPLIT = {
         'test_size': 0.2,
         'random_state': 42
     }
     
-    # ----------------------------- #
-    #     Treinamento Final        #
-    # ----------------------------- #
     FINAL_TRAINING = {
-        'num_models': 20,
+        'num_models': 30,
         'seed_offset': 42
     }
 
@@ -150,75 +97,44 @@ class Config:
         'fractions': [0.1, 0.2, 0.4, 0.6, 0.8, 1.0],
         'epochs': 10
     }
+    
+    @classmethod
+    def get_groups_file(cls, scenario):
+        dir_name = cls.SCENARIOS[scenario][0]
+        return os.path.normpath(os.path.join(cls.DATA_PATH, dir_name, "labels", "groups.npy"))
 
+    @classmethod
+    def get_data_file(cls, scenario):
+        dir_name, filename, _ = cls.SCENARIOS[scenario]
+        return os.path.normpath(os.path.join(cls.DATA_PATH, dir_name, "data", filename))
 
-    
     @classmethod
-    def get_array_size(cls, position):
-        """Retorna o tamanho do array baseado na posição"""
-        return 1020 if position == "chest" else 450
-    
+    def get_labels_file(cls, scenario):
+        dir_name = cls.SCENARIOS[scenario][0]
+        return os.path.normpath(os.path.join(cls.DATA_PATH, dir_name, "labels", "labels.npy"))
+
     @classmethod
-    def get_num_labels(cls, label_type):
-        """Retorna o número de labels baseado no tipo"""
-        if label_type == "multiple_one":
-            return 37
-        elif label_type == "multiple_two":
-            return 26
-        else:  # binary_one or binary_two
-            return 2
-    
+    def get_output_dir(cls, model_type, scenario):
+        base = os.path.normpath(os.path.join(cls.ROOT_DIR, "..", "output"))
+        if model_type:
+            return os.path.join(base, model_type, scenario)
+        return os.path.join(base, scenario)
+
     @classmethod
-    def get_input_shape_dict(cls, scenario, position, model_type=None):
-        """Retorna o dicionário de shapes de entrada para cada modelo"""
-        array_size = cls.get_array_size(position)
-        scenario_config = cls.SCENARIOS[scenario]
-        
-        # Ajustar shape baseado no array_size
-        if position == "chest":
-            input_shape = scenario_config[1]
-        else:  # left or right
-            # Ajustar para 450 samples
-            if scenario_config[1][1] == 1:  # 1 feature
-                input_shape = (450, 1)
-            elif scenario_config[1][1] == 2:  # 2 features
-                input_shape = (450, 2)
-            elif scenario_config[1][1] == 3:  # 3 features
-                input_shape = (450, 3)
-            elif scenario_config[1][1] == 6:  # 6 features
-                input_shape = (450, 6)
-        
-        input_shape_dict = {
-            "CNN1D": input_shape,
-            "MLP": np.prod(input_shape),
-            "LSTM": input_shape
+    def get_input_shape_dict(cls, scenario, model_type=None):
+        seq_len, num_features = cls.SCENARIOS[scenario][2]
+        full = {
+            "CNN1D": (seq_len, num_features),
+            "MLP":   seq_len * num_features,
+            "LSTM":  (seq_len, num_features),
         }
-        
-        return input_shape_dict
-    
+        if model_type:
+            return {model_type: full[model_type]}
+        return full
+
     @classmethod
     def get_feature_names(cls, scenario):
-        """Retorna a lista de nomes reais das features para cada cenário"""
-        # Mapear nomes de features por cenário
-        feature_map = {
-            # 1D
-            "Sc1_acc_T": ["magacc"],
-            "Sc1_gyr_T": ["maggyr"],
-            "Sc1_acc_F": ["magacc"],
-            "Sc1_gyr_F": ["maggyr"],
-            # 3D
-            "Sc_2_acc_T": ["acc_x", "acc_y", "acc_z"],
-            "Sc_2_gyr_T": ["gyr_x", "gyr_y", "gyr_z"],
-            "Sc_2_acc_F": ["acc_x", "acc_y", "acc_z"],
-            "Sc_2_gyr_F": ["gyr_x", "gyr_y", "gyr_z"],
-            # 2D
-            "Sc_3_T": ["magacc", "maggyr"],
-            "Sc_3_F": ["magacc", "maggyr"],
-            # 6D
-            "Sc_4_T": ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"],
-            "Sc_4_F": ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"],
-        }
-        return feature_map.get(scenario, [f"f{i}" for i in range(cls.SCENARIOS[scenario][1][1])])
+        return ["acc_x", "acc_y", "acc_z", "magacc", "gyr_x", "gyr_y", "gyr_z", "maggyr"]
     
     @classmethod
     def setup_device(cls):
@@ -251,10 +167,3 @@ class Config:
         np.random.seed(seed)
         import random
         random.seed(seed)
-    
-    @classmethod
-    def get_output_dir(cls, model_type, position, scenario, label_type):
-        """Retorna o diretório de saída"""
-        base_out = os.path.join(cls.OUTPUT_PATH, model_type, position, scenario, label_type)
-        os.makedirs(base_out, exist_ok=True)
-        return base_out 
