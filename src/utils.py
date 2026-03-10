@@ -36,7 +36,7 @@ from config import Config
 # TREINAMENTO E VALIDAÇÃO
 # =============================================================================
 
-def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=25, early_stopping=False, patience=5, scaler=None, trial=None, step_offset=0):
+def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=25, early_stopping=False, patience=5, scaler=None, trial=None, step_offset=0, scheduler=None):
     """
     Treina modelo com early stopping, mixed precision e pruning opcional
     """
@@ -95,6 +95,10 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
 
         avg_val_loss = np.mean(val_losses)
         avg_val_losses.append(avg_val_loss)
+
+        # Step LR scheduler based on validation loss
+        if scheduler is not None:
+            scheduler.step(avg_val_loss)
 
         # Pruning intermediário (se trial fornecido)
         if trial is not None:
@@ -270,12 +274,16 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
                 batch_size = batch_size * torch.cuda.device_count()
                 print(f"Batch size ajustado para {batch_size} (batch_size * num_gpus)")
             
-            optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+            optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
             # Weighted loss: penalise missing falls (minority class) more than false alarms
             class_counts = np.bincount(y_train_flat, minlength=2)
             class_weights = len(y_train_flat) / (2 * class_counts.astype(float))
             weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
             criterion = torch.nn.CrossEntropyLoss(weight=weight_tensor)
+
+            fold_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6,
+            )
 
             # Preparar data loaders
             train_loader = torch.utils.data.DataLoader(
@@ -306,7 +314,8 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
                 early_stopping=Config.TRAINING_CONFIG['early_stopping'], 
                 patience=Config.TRAINING_CONFIG['patience'], 
                 trial=trial,
-                step_offset=fold_idx * Config.TRAINING_CONFIG['epochs']
+                step_offset=fold_idx * Config.TRAINING_CONFIG['epochs'],
+                scheduler=fold_scheduler,
             )
 
             all_train_losses.append(train_losses)

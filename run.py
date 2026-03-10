@@ -1,28 +1,48 @@
 #!/usr/bin/env python3
 """
-run.py - Optuna search and/or final training for all models and scenarios.
+run.py - Batch runner: Optuna search and/or model evaluation for all models and scenarios.
 
 Usage:
-    python run.py [--search] [--train]
+    python run.py [--search] [--train] [--nested]
                   [--model <MODEL>] [--scenario <SCENARIO>]
                   [--n_trials <N>] [--num_models <N>] [--epochs <N>]
 
 Modes (combinable; default is --train only):
-    --search     Run Optuna hyperparameter search
-    --train      Run final training
+    --search     Run Optuna hyperparameter search (LOGO over 12 trainval subjects)
+    --train      LOGO evaluation using fixed 3-subject holdout
+    --nested     Nested LOGO (outer LOGO over 15; inner Optuna per fold — gold standard)
 
 Filters (optional):
     --model <MODEL>        One of: CNN1D MLP LSTM RF SVM XGBoost
     --scenario <SCENARIO>  e.g. chest_T, left_T ...
 
+Evaluation strategies
+---------------------
+  --train:
+    Requires a prior --search run.
+    Locks 3 subjects away as an untouched test set.
+    Optuna searches over LOGO on the remaining 12.
+    Each LOGO fold (11 train / 1 val for early stopping) is evaluated on those fixed 3.
+    Reports mean ± std across 12 folds.
+
+  --nested:
+    Self-contained; no prior --search needed.
+    Outer LOGO over all 15 subjects.
+    For each outer fold, a fresh inner Optuna runs on the 14 remaining subjects.
+    Evaluates on the single left-out subject.
+    Reports mean ± std across 15 folds.
+    15× more compute than --train, but zero HP leakage and uses all subjects.
+
 Examples:
     python run.py                                              # train all (DEFAULT_PARAMS)
     python run.py --search --train                             # search then train, all combos
+    python run.py --nested                                     # nested LOGO, all combos
     python run.py --search --model RF                          # search only, RF, all scenarios
     python run.py --train --model CNN1D --scenario chest_T     # train one combo
-    python run.py --search --train --model LSTM --n_trials 50 --num_models 20 --epochs 300
+    python run.py --nested --model CNN1D --n_trials 15         # nested, CNN1D, 15 inner trials
+    python run.py --search --train --model LSTM --n_trials 50 --epochs 300
 
-Logs: logs/<model>_<scenario>_{search,train}.log
+Logs: logs/<model>_<scenario>_{search,train,nested}.log
 """
 
 import argparse
@@ -112,6 +132,19 @@ def run_train(model: str, scenario: str, num_models: int, epochs: int) -> None:
     print(f"    done  (log: {log})")
 
 
+def run_nested(model: str, scenario: str, n_trials: int, epochs: int) -> None:
+    log = LOG_DIR / f"{model}_{scenario}_nested.log"
+    print(f">>  nested  model={model}  scenario={scenario}  n_trials={n_trials}")
+    cmd = [sys.executable, "-u", "pipeline.py", "nested",
+           "-scenario", scenario,
+           "--model", model,
+           "--n_trials", str(n_trials)]
+    if not is_classical(model):
+        cmd += ["--epochs", str(epochs)]
+    run_command(cmd, log)
+    print(f"    done  (log: {log})")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -122,11 +155,13 @@ def parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     parser.add_argument("--search",     action="store_true", help="Run Optuna hyperparameter search")
-    parser.add_argument("--train",      action="store_true", help="Run final training")
+    parser.add_argument("--train",      action="store_true", help="Run LOGO eval with fixed 3-subject holdout")
+    parser.add_argument("--nested",     action="store_true", help="Run nested LOGO (outer 15 / inner Optuna per fold)")
     parser.add_argument("--model",      metavar="MODEL",    help="One of: " + " ".join(ALL_MODELS))
     parser.add_argument("--scenario",   metavar="SCENARIO", help="e.g. chest_T, left_T ...")
     parser.add_argument("--n_trials",   type=int, default=30,  metavar="N")
-    parser.add_argument("--num_models", type=int, default=30,  metavar="N")
+    parser.add_argument("--num_models", type=int, default=1,   metavar="N",
+                        help="LOGO repetitions for --train (default=1)")
     parser.add_argument("--epochs",     type=int, default=200, metavar="N")
     return parser.parse_args()
 
@@ -138,7 +173,7 @@ def main() -> None:
     args = parse_args()
 
     # Default: train only
-    if not args.search and not args.train:
+    if not args.search and not args.train and not args.nested:
         args.train = True
 
     models    = [args.model]    if args.model    else list(ALL_MODELS)
@@ -148,6 +183,7 @@ def main() -> None:
     mode_str = " ".join(filter(None, [
         "search" if args.search else "",
         "train"  if args.train  else "",
+        "nested" if args.nested else "",
     ]))
 
     print("=" * 56)
@@ -157,9 +193,11 @@ def main() -> None:
     print(f"  Scenarios: {' '.join(scenarios)}")
     print(f"  Combos   : {total}")
     if args.search:
-        print(f"  n_trials : {args.n_trials}")
+        print(f"  n_trials  : {args.n_trials}")
     if args.train:
-        print(f"  num_models: {args.num_models} | epochs: {args.epochs} (NN only)")
+        print(f"  num_models: {args.num_models} LOGO reps | epochs: {args.epochs} (NN only)")
+    if args.nested:
+        print(f"  n_trials  : {args.n_trials} (inner, per outer fold) | epochs: {args.epochs} (NN only)")
     print("=" * 56)
     print()
 
@@ -172,6 +210,9 @@ def main() -> None:
 
             if args.train:
                 run_train(model, scenario, args.num_models, args.epochs)
+
+            if args.nested:
+                run_nested(model, scenario, args.n_trials, args.epochs)
 
             print()
 

@@ -12,9 +12,11 @@ class CNN1DNet(nn.Module):
         self.drop = nn.Dropout(dropout)
 
         self.convs = nn.ModuleList()
+        self.bns = nn.ModuleList()
         in_ch = self.input_channels
         for _ in range(num_layers):
             self.convs.append(nn.Conv1d(in_ch, filter_size, kernel_size, padding=kernel_size // 2))
+            self.bns.append(nn.BatchNorm1d(filter_size))
             in_ch, filter_size = filter_size, filter_size * 2
 
         self.fcs = nn.ModuleList()
@@ -27,14 +29,14 @@ class CNN1DNet(nn.Module):
 
     def _get_conv_output_size(self):
         x = torch.zeros(1, self.input_channels, self.seq_length)
-        for conv in self.convs:
-            x = self.pool(F.relu(conv(x)))
+        for conv, bn in zip(self.convs, self.bns):
+            x = self.pool(F.relu(bn(conv(x))))
         return x.view(1, -1).shape[1]
 
     def forward(self, x):
         x = x.squeeze(1).permute(0, 2, 1)
-        for conv in self.convs:
-            x = self.drop(self.pool(F.relu(conv(x))))
+        for conv, bn in zip(self.convs, self.bns):
+            x = self.drop(self.pool(F.relu(bn(conv(x)))))
         x = x.view(x.size(0), -1)
         for fc in self.fcs:
             x = self.drop(F.relu(fc(x)))

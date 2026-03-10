@@ -17,7 +17,8 @@ Suporta **3 arquiteturas de redes neurais** (CNN1D, MLP, LSTM) e **3 modelos cl�
 - **Tratamento de Desbalanceamento**: `CrossEntropyLoss` ponderada (redes neurais) e `class_weight='balanced'` / `scale_pos_weight` (modelos clássicos)
 - **6 Posições de Sensor**: individuais (chest, left, right) e fusões (chest\_left, chest\_right, chest\_left\_right)
 - **Domínio Temporal e de Frequência**: todos os cenários disponíveis nos dois domínios
-- **Validação Cruzada LOGO**: Leave-One-Group-Out por participante (12 folds sobre 12 indivíduos de treino/val; 3 indivíduos reservados para teste)
+- **Validação Cruzada LOGO**: Leave-One-Subject-Out por participante
+- **Duas estratégias de avaliação**: holdout fixo de 3 sujeitos + LOGO aninhado (ver abaixo)
 - **Split por Indivíduo**: Separação treino/val e teste feita a nível de participante (sem vazamento de dados)
 - **Explicabilidade**: Análise SHAP
 - **Curvas de Aprendizado**: Análise de performance vs. quantidade de dados
@@ -83,8 +84,42 @@ O arquivo `src/config.py` centraliza todas as configurações:
 - **Hiperparâmetros**: Ranges para otimização por arquitetura (`MODEL_CONFIGS`)
 - **Parâmetros Padrão**: `DEFAULT_PARAMS` por modelo, usado quando não há busca Optuna
 - **Treinamento**: epochs, patience, batch\_size, etc.
-- **Split de dados**: 15 indivíduos — 3 reservados para teste (20% a nível de participante), 12 para LOGO (treino/val)
+- **Split de dados**: 15 indivíduos; estratégia depende do modo (ver Pipeline abaixo)
 - **Modelos clássicos**: `CLASSICAL_MODELS = {"RF", "SVM", "XGBoost"}`
+
+## Estratégias de Avaliação
+
+O pipeline oferece duas estratégias, ambas sem vazamento de dados entre sujeitos:
+
+### Holdout Fixo (`search` + `train`)
+
+```
+15 sujeitos
+├── 3 sujeitos de teste (fixos, bloqueados desde o início)
+└── 12 sujeitos de treino/val
+      ├── Optuna: LOGO 12-fold → seleciona HPs
+      └── train: LOGO 12-fold (11 treino / 1 val para early stopping)
+                 → avalia nos 3 sujeitos de teste fixos
+                 → reporta média ± desvio sobre os 12 folds
+```
+
+**Prós:** 1 rodada Optuna; rápido.  
+**Contra:** métrica final baseada em apenas 3 sujeitos.
+
+### LOGO Aninhado (`nested`) — padrão ouro
+
+```
+15 sujeitos
+└── LOGO externo (15-fold):
+      para cada fold externo (sujeito i de teste):
+        └── Optuna: LOGO interno sobre 14 sujeitos → HPs para este fold
+            treina com esses HPs
+            avalia no sujeito i
+      → reporta média ± desvio sobre os 15 folds
+```
+
+**Prós:** zero leakage de HPs; todos os 15 sujeitos contribuem para o teste.  
+**Contra:** 15× mais compute (15 rodadas Optuna).
 
 ## Pipeline de Treinamento (`pipeline.py`)
 
@@ -92,11 +127,13 @@ Todos os comandos são executados a partir de `src/`.
 
 Os modelos disponíveis são: `CNN1D`, `MLP`, `LSTM` (redes neurais) e `RF`, `SVM`, `XGBoost` (modelos clássicos).
 
-### 1. Busca de Hiperparâmetros (Optuna)
+### 1. Busca de Hiperparâmetros (Optuna) — para estratégia holdout
 
 ```bash
 python pipeline.py search -scenario <SCENARIO> --model <MODEL> [--n_trials 30] [--timeout 3600]
 ```
+
+Roda LOGO sobre os **12 sujeitos de treino**. Salva `best_hyperparameters.json` e `test_data.npz` (com os 3 sujeitos de teste bloqueados).
 
 ### 2. Análise Pós-Trials
 
@@ -104,15 +141,26 @@ python pipeline.py search -scenario <SCENARIO> --model <MODEL> [--n_trials 30] [
 python pipeline.py post_trials -scenario <SCENARIO> --model <MODEL>
 ```
 
-### 3. Treinamento Final
+### 3. Avaliação LOGO com Holdout Fixo (`train`)
+
+Requer `search` executado previamente.
 
 ```bash
-# Com resultados da busca Optuna (requer search previamente executado)
-python pipeline.py train -scenario <SCENARIO> --model <MODEL> [--num_models 30] [--epochs 200]
-
-# Sem busca prévia — usa DEFAULT_PARAMS do config.py
-python pipeline.py train -scenario <SCENARIO> --model <MODEL> [--num_models 10]
+python pipeline.py train -scenario <SCENARIO> --model <MODEL> [--num_models 1] [--epochs 200]
 ```
+
+Cada fold treina em 11 sujeitos, usa o 12º como validação (early stopping), e avalia nos **3 sujeitos de teste fixos**.
+`--num_models` controla o número de repetições LOGO completas (padrão=1 → 12 folds).
+
+### 4. LOGO Aninhado (`nested`) — padrão ouro
+
+Autossuficiente; não requer `search` prévio.
+
+```bash
+python pipeline.py nested -scenario <SCENARIO> --model <MODEL> [--n_trials 15] [--epochs 200]
+```
+
+Para cada um dos 15 sujeitos como fold externo, roda Optuna interno sobre os 14 restantes, treina com os melhores HPs e avalia no sujeito deixado de fora.
 
 > **Nota:** para modelos clássicos (RF, SVM, XGBoost), `--epochs` é ignorado.
 
@@ -166,7 +214,7 @@ O nome do cenário segue o padrão `<posição>_T` (domínio temporal) ou `<posi
 ```
 fall-detect/
 ├── requirements.txt
-├── run.py                    # Script em lote: busca e/ou treino de todos os modelos/cenários
+├── run.py                    # Script em lote: busca e/ou avaliação de todos os modelos/cenários
 ├── dataset/
 │   ├── 0_raw/               # Dados brutos (ID1..ID15 / CHEST, LEFT, RIGHT)
 │   ├── chest/data/ labels/  # Datasets gerados por posição
@@ -177,10 +225,10 @@ fall-detect/
 │   └── chest_left_right/
 └── src/
     ├── config.py             # Configurações centralizadas (modelos, splits, DEFAULT_PARAMS)
-    ├── pipeline.py           # CLI: search | post_trials | train
+    ├── pipeline.py           # CLI: search | post_trials | train | nested
     ├── analysis_pipeline.py  # CLI: shap | learning_curve | aggregate | analyze
     ├── utils.py              # Loop de treino, Optuna, métricas, visualizações, modelos clássicos
-    ├── neural_networks.py    # Arquiteturas CNN1D, MLP, LSTM
+    ├── neural_networks.py    # Arquiteturas CNN1D (+ BatchNorm), MLP, LSTM
     └── data/
         ├── generate_datasets.py       # Geração de datasets (sensores individuais)
         ├── generate_fused_dataset.py  # Geração de datasets fundidos
@@ -191,6 +239,17 @@ fall-detect/
 ## Saídas Geradas
 
 As saídas são salvas em `output/<model>/<scenario>/`:
+
+### Holdout fixo (`train`)
+- `rep_<N>/fold_s<subject>/` — resultados por fold
+  - `losses_*.csv`, `loss_curve_*.png` — curvas de loss
+  - `confusion_matrix_*.png`, `roc_curve_*.png` — métricas visuais
+  - `metrics_*.csv` — métricas numéricas
+
+### LOGO aninhado (`nested`)
+- `nested/outer_s<subject>/` — um diretório por fold externo
+  - `best_hyperparameters.json` — HPs selecionados pelo Optuna interno
+  - Mesmos artefatos de métricas do modo `train`
 
 ### Busca de Hiperparâmetros
 - `optuna_study.db` — Banco SQLite do Optuna
