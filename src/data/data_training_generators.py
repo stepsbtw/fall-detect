@@ -119,7 +119,7 @@ def create_data_sets_for_training(position, activity, magacc, xacc, yacc, zacc, 
     five_second_activity_list = ["FALL_1", "FALL_2", "FALL_3", "FALL_4", "FALL_5", "ADL_5", "ADL_6", "ADL_7", "ADL_8", "ADL_13"]
     transition_activities_list = ["OM_3", "OM_4", "OM_5", "OM_6", "OM_7", "OM_8"]
 
-    array_size = 1020 if position == "CHEST" else 450
+    array_size = 1100 if position == "CHEST" else 460
 
     if len(xgyr) >= array_size and len(xacc) >= array_size:
         if activity in five_second_activity_list:

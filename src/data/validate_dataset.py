@@ -22,7 +22,7 @@ import sys
 import numpy as np
 
 EXPECTED_CHANNELS   = 8
-EXPECTED_ARRAY_SIZE = {"chest": 1020, "left": 450, "right": 450}
+EXPECTED_ARRAY_SIZE = {"chest": 1100, "left": 460, "right": 460}
 EXPECTED_FREQ_SIZE  = {k: v // 2 for k, v in EXPECTED_ARRAY_SIZE.items()}
 VALID_LABELS        = {0, 1}
 VALID_GROUPS        = set(range(1, 16))

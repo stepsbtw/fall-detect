@@ -47,7 +47,7 @@ TRANSITION_ACTIVITIES = frozenset([
 ])
 
 # Nominal window sizes used by the original pipeline (obs per 5-second window)
-DEFAULT_ARRAY_SIZES = {"CHEST": 1020, "LEFT": 450, "RIGHT": 450}
+DEFAULT_ARRAY_SIZES = {"CHEST": 1100, "LEFT": 460, "RIGHT": 460}
 
 WINDOW_MS = 5_000  # 5 seconds expressed in milliseconds
 
@@ -200,8 +200,8 @@ parser.add_argument(
     help="Path to the output directory (default: same as this script)",
 )
 parser.add_argument(
-    "--target-size", type=int, default=450,
-    help="Common window length after resampling (default: 450)",
+    "--target-size", type=int, default=460,
+    help="Common window length after resampling (default: 460)",
 )
 args = parser.parse_args()
 

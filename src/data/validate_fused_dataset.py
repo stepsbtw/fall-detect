@@ -43,8 +43,8 @@ parser.add_argument(
     help="Root dataset directory (contains the fused subdirectory)",
 )
 parser.add_argument(
-    "--target-size", type=int, default=450,
-    help="Expected window length after resampling (default: 450)",
+    "--target-size", type=int, default=460,
+    help="Expected window length after resampling (default: 460)",
 )
 args = parser.parse_args()
 
