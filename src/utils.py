@@ -23,7 +23,7 @@ from neural_networks import CNN1DNet, MLPNet, LSTMNet
 import optuna.visualization as vis
 import random
 from sklearn.model_selection import LeaveOneGroupOut
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, fbeta_score
 import json
 import seaborn as sns
 from config import Config
@@ -145,7 +145,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
     learning_rate = trial.suggest_float('learning_rate', Config.OPTIMIZER_CONFIG['lr_range'][0], Config.OPTIMIZER_CONFIG['lr_range'][1], log=Config.OPTIMIZER_CONFIG['lr_log'])
     decision_threshold = trial.suggest_float('decision_threshold', Config.METRICS_CONFIG['decision_threshold_range'][0], Config.METRICS_CONFIG['decision_threshold_range'][1], step=Config.METRICS_CONFIG['decision_threshold_step'])
 
-    mcc_scores = []
+    f2_scores = []
     all_train_losses = []
     all_val_losses = []
 
@@ -205,7 +205,12 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
             print(f"Batch size ajustado para {batch_size} (batch_size * num_gpus)")
         
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        criterion = torch.nn.CrossEntropyLoss()
+        # Weighted loss: penalise missing falls (minority class) more than false alarms
+        y_train_flat = np.argmax(y_train, axis=1) if len(y_train.shape) > 1 else y_train
+        class_counts = np.bincount(y_train_flat, minlength=2)
+        class_weights = len(y_train_flat) / (2 * class_counts.astype(float))
+        weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+        criterion = torch.nn.CrossEntropyLoss(weight=weight_tensor)
 
         # Preparar data loaders
         train_loader = torch.utils.data.DataLoader(
@@ -252,29 +257,26 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
             model=model,
             val_loader=val_loader,
             y_val_onehot=y_val,
-            number_of_labels=num_labels,
             i=f"{trial.number}fold{fold_idx + 1}",
             decision_threshold=decision_threshold,
             output_dir=fold_dir,
             device=device
         )
 
-        # Calcular MCC
-        if num_labels == 2:
-            y_probs = []
-            model.eval()
-            with torch.no_grad():
-                for xb, _ in val_loader:
-                    xb = xb.to(device)
-                    out = model(xb)
-                    probs = F.softmax(out, dim=1)[:, 1].cpu().numpy()
-                    y_probs.extend(probs)
-            y_pred_thresh = (np.array(y_probs) >= decision_threshold).astype(int)
-            mcc = matthews_corrcoef(y_true, y_pred_thresh)
-        else:
-            mcc = matthews_corrcoef(y_true, y_pred)
+        # Calcular F2-score (beta=2 weights recall 2x over precision — missing a fall is costly)
+        fall_class = Config.METRICS_CONFIG['fall_class']
+        y_probs = []
+        model.eval()
+        with torch.no_grad():
+            for xb, _ in val_loader:
+                xb = xb.to(device)
+                out = model(xb)
+                probs = F.softmax(out, dim=1)[:, 1].cpu().numpy()
+                y_probs.extend(probs)
+        y_pred_thresh = (np.array(y_probs) >= decision_threshold).astype(int)
+        f2 = fbeta_score(y_true, y_pred_thresh, beta=2, pos_label=fall_class, zero_division=0)
 
-        mcc_scores.append(mcc)
+        f2_scores.append(f2)
 
         # Pruning check após cada fold
         if trial.should_prune():
@@ -284,8 +286,8 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
         del optimizer
         torch.cuda.empty_cache()
 
-    mean_mcc = np.mean(mcc_scores)
-    print(f"Trial {trial.number} - Média MCC: {mean_mcc:.4f}")
+    mean_f2 = np.mean(f2_scores)
+    print(f"Trial {trial.number} - Média F2 (fall): {mean_f2:.4f}")
 
     # Salvar resumo do trial
     trial_dir = os.path.join(output_dir, f"trial_{trial.number}")
@@ -299,8 +301,8 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
             "learning_rate": learning_rate,
             "decision_threshold": decision_threshold
         },
-        "mean_mcc": float(mean_mcc),
-        "mcc_scores": mcc_scores
+        "mean_f2": float(mean_f2),
+        "f2_scores": f2_scores
     }
 
     if model_type == "CNN1D":
@@ -325,7 +327,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
     with open(os.path.join(trial_dir, "trial_summary.json"), "w") as f:
         json.dump(summary, f, indent=4)
 
-    return mean_mcc
+    return mean_f2
 
 def run_optuna(input_shape_dict, X_trainval, y_trainval, groups, output_dir, num_labels, device, study_name, restrict_model_type=None):
     """
@@ -390,7 +392,7 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, groups, output_dir, num
 # SALVAMENTO E ANÁLISE DE RESULTADOS
 # =============================================================================
 
-def save_results(model, val_loader, y_val_onehot, number_of_labels, i, decision_threshold, output_dir, device):
+def save_results(model, val_loader, y_val_onehot, i, decision_threshold, output_dir, device):
     """
     Salva resultados completos do modelo
     """
@@ -414,53 +416,38 @@ def save_results(model, val_loader, y_val_onehot, number_of_labels, i, decision_
 
     y_probs = np.array(y_probs)
     y_true = np.array(y_true)
-    y_pred = (y_probs[:, 1] >= decision_threshold).astype(int) if number_of_labels == 2 else np.argmax(y_probs, axis=1)
+    y_pred = (y_probs[:, 1] >= decision_threshold).astype(int)
 
     # 3. Confusion Matrix
     cm = confusion_matrix(y_true, y_pred)
-    tn, fp, fn, tp = cm.ravel() if number_of_labels == 2 else (0, 0, 0, 0)
-    plot_confusion_matrix(cm, number_of_labels, output_dir, i)
+    tn, fp, fn, tp = cm.ravel()
+    plot_confusion_matrix(cm, output_dir, i)
 
     # 4. Classification report
-    save_classification_report(y_pred, y_true, number_of_labels, output_dir, i)
+    save_classification_report(y_pred, y_true, output_dir, i)
 
-    # 5. ROC curve (apenas binário)
-    if number_of_labels == 2:
-        plot_roc_curve(y_probs[:, 1], y_true, output_dir, i)
+    # 5. ROC curve
+    plot_roc_curve(y_probs[:, 1], y_true, output_dir, i)
 
     # 6. Métricas
-    if number_of_labels == 2:
-        metrics = calculate_metrics(tp, tn, fp, fn, y_true, y_pred)
-        record_metrics(metrics, tp, tn, fp, fn, i, output_dir)
-    else:
-        # Para multiclasse, ainda salva MCC e F1
-        mcc = matthews_corrcoef(y_true, y_pred)
-        f1 = f1_score(y_true, y_pred, average="macro")
-        with open(os.path.join(output_dir, f"metrics_model_{i}.txt"), "w") as f:
-            f.write(f"MCC: {mcc:.4f}\n")
-            f.write(f"F1-score (macro): {f1:.4f}\n")
+    metrics = calculate_metrics(tp, tn, fp, fn, y_true, y_pred)
+    record_metrics(metrics, tp, tn, fp, fn, i, output_dir)
 
 # =============================================================================
 # VISUALIZAÇÕES
 # =============================================================================
 
-def plot_confusion_matrix(cm, number_of_labels, output_dir, i):
+def plot_confusion_matrix(cm, output_dir, i):
     """
     Plota matriz de confusão
     """
     plt.figure(figsize=(8, 6))
-    if number_of_labels == 2:
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                    xticklabels=['Não Queda', 'Queda'], 
-                    yticklabels=['Não Queda', 'Queda'])
-        plt.title(f'Matriz de Confusão - Modelo {i}')
-        plt.ylabel('Valor Real')
-        plt.xlabel('Valor Predito')
-    else:
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-        plt.title(f'Matriz de Confusão - Modelo {i}')
-        plt.ylabel('Valor Real')
-        plt.xlabel('Valor Predito')
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=['Não Queda', 'Queda'],
+                yticklabels=['Não Queda', 'Queda'])
+    plt.title(f'Matriz de Confusão - Modelo {i}')
+    plt.ylabel('Valor Real')
+    plt.xlabel('Valor Predito')
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'confusion_matrix_model_{i}.png'), dpi=300, bbox_inches='tight')
@@ -549,7 +536,7 @@ def record_metrics(metrics, tp, tn, fp, fn, i, output_dir):
             "fn": fn
         })
 
-def save_classification_report(y_pred, y_true, number_of_labels, output_dir, i):
+def save_classification_report(y_pred, y_true, output_dir, i):
     """
     Salva relatório de classificação
     """
@@ -580,7 +567,14 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
         X_subset = X_full[idx]
         y_subset = y_full[idx]
 
-        print(f"\nTreinando com {size} amostras ({int(frac*100)}% do dataset)")
+        # Hold out 20 % of this subset as local validation.
+        # X_test is NEVER touched here — it is only used for the final
+        # evaluation after training finishes.
+        split = int(len(X_subset) * 0.8)
+        X_tr, X_vl = X_subset[:split], X_subset[split:]
+        y_tr, y_vl = y_subset[:split], y_subset[split:]
+
+        print(f"\nTreinando com {len(X_tr)} amostras ({int(frac*100)}% do dataset, val={len(X_vl)})")
 
         # Criar modelo
         model = create_model_fn(best_params, input_shape, num_labels)
@@ -591,9 +585,14 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
 
         batch_size =  Config.TRAINING_CONFIG.get('batch_size', 32)
         train_loader = torch.utils.data.DataLoader(
-            torch.utils.data.TensorDataset(torch.tensor(X_subset, dtype=torch.float32), torch.tensor(y_subset, dtype=torch.long)),
+            torch.utils.data.TensorDataset(torch.tensor(X_tr, dtype=torch.float32), torch.tensor(y_tr, dtype=torch.long)),
             batch_size=batch_size,
             shuffle=True
+        )
+        val_loader = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(torch.tensor(X_vl, dtype=torch.float32), torch.tensor(y_vl, dtype=torch.long)),
+            batch_size=batch_size,
+            shuffle=False
         )
         test_loader = torch.utils.data.DataLoader(
             torch.utils.data.TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)),
@@ -601,16 +600,16 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
             shuffle=False
         )
 
-        # Treinamento curto
+        # Treinamento curto (val_loader is the local holdout, NOT the test set)
         y_pred, y_true, val_losses, train_losses = train(
-            model, train_loader, test_loader, optimizer, criterion, device,
+            model, train_loader, val_loader, optimizer, criterion, device,
             epochs=epochs,
             early_stopping=False,
             patience=5,
             scaler=None
         )
 
-        # Avaliação final
+        # Avaliação final no test set (sem gradiente, só métricas)
         model.eval()
         y_preds = []
         y_true_final = []

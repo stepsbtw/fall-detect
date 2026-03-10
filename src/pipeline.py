@@ -30,15 +30,28 @@ SCENARIO_CHOICES = [
 ]
 
 def _split_and_report(X, y, groups):
-    """Split into trainval/test and print sizes, preserving group assignment."""
-    X_trainval, X_test, y_trainval, y_test, groups_trainval, _ = train_test_split(
-        X, y, groups,
-        test_size=Config.DATA_SPLIT['test_size'],
-        random_state=Config.DATA_SPLIT['random_state'],
-        shuffle=False,
+    """Hold out the last N_TEST_INDIVIDUALS groups as the test set.
+
+    All samples from the same individual stay together — no individual
+    ever appears in both train/val and test.
+    """
+    unique_groups = np.unique(groups)  # sorted ascending
+    assert len(unique_groups) == Config.N_INDIVIDUALS, (
+        f"Expected {Config.N_INDIVIDUALS} individuals, found {len(unique_groups)}"
     )
-    print(f"Train/Val split: {X_trainval.shape[0]} amostras")
-    print(f"Test split: {X_test.shape[0]} amostras")
+
+    test_groups = unique_groups[-Config.N_TEST_INDIVIDUALS:]
+    test_mask   = np.isin(groups, test_groups)
+    trainval_mask = ~test_mask
+
+    X_trainval     = X[trainval_mask]
+    y_trainval     = y[trainval_mask]
+    groups_trainval = groups[trainval_mask]
+    X_test         = X[test_mask]
+    y_test         = y[test_mask]
+
+    print(f"Individuals in train/val: {sorted(np.unique(groups_trainval).tolist())}  ({X_trainval.shape[0]} samples)")
+    print(f"Individuals in test:      {sorted(test_groups.tolist())}  ({X_test.shape[0]} samples)")
     return X_trainval, X_test, y_trainval, y_test, groups_trainval
 
 
@@ -191,7 +204,12 @@ def run_post_trials(args):
                         X_trainval, y_trainval, X_test, y_test)
 
 def run_final_training(args):
-    """Train N models with the best hyperparameters found by Optuna."""
+    """Train N models with the best hyperparameters found by Optuna.
+
+    If no prior search artefacts exist (best_hyperparameters.json / test_data.npz)
+    the function falls back to Config.DEFAULT_PARAMS for the requested model type
+    and re-splits the raw dataset, so training can run without a search step.
+    """
     scenario = args.scenario
     model_type_arg = args.nn
     num_models = args.num_models
@@ -200,19 +218,45 @@ def run_final_training(args):
     base_out = Config.get_output_dir(model_type_arg, scenario)
     os.makedirs(base_out, exist_ok=True)
 
-    best_params = load_hyperparameters(base_out)
-    if "best_params" in best_params:
-        best_params = best_params["best_params"]
-    model_type = best_params.get("model_type", model_type_arg)
+    # ── Hyperparameters ───────────────────────────────────────────────────────
+    hp_file = os.path.join(base_out, "best_hyperparameters.json")
+    if os.path.exists(hp_file):
+        best_params = load_hyperparameters(base_out)
+        if "best_params" in best_params:
+            best_params = best_params["best_params"]
+        model_type = best_params.get("model_type", model_type_arg)
+        print(f"Usando hiperparâmetros do Optuna: {hp_file}")
+    else:
+        if not model_type_arg:
+            raise ValueError(
+                "Nenhum resultado de busca encontrado em '{base_out}'. "
+                "Use --nn para especificar o modelo ao treinar com parâmetros padrão."
+            )
+        model_type = model_type_arg
+        best_params = Config.DEFAULT_PARAMS[model_type]
+        print(f"[AVISO] Nenhum resultado de busca encontrado. "
+              f"Usando parâmetros padrão para {model_type}: {best_params}")
 
-    data = np.load(os.path.join(base_out, "test_data.npz"))
-    X_trainval, y_trainval = data['X_trainval'], data['y_trainval']
-    X_test, y_test = data['X_test'], data['y_test']
+    # ── Data ─────────────────────────────────────────────────────────────────
+    test_data_file = os.path.join(base_out, "test_data.npz")
+    if os.path.exists(test_data_file):
+        data = np.load(test_data_file)
+        X_trainval, y_trainval = data['X_trainval'], data['y_trainval']
+        X_test, y_test = data['X_test'], data['y_test']
+    else:
+        print("[AVISO] test_data.npz não encontrado. Carregando e dividindo dados brutos...")
+        X = np.load(Config.get_data_file(scenario))
+        y = np.load(Config.get_labels_file(scenario)).astype(np.int64)
+        groups = np.load(Config.get_groups_file(scenario))
+        X_trainval, X_test, y_trainval, y_test, _ = _split_and_report(X, y, groups)
+        np.savez(test_data_file, X_trainval=X_trainval, y_trainval=y_trainval,
+                 X_test=X_test, y_test=y_test)
+        print(f"Divisão salva em {test_data_file}")
 
     X_train, X_val, y_train, y_val = train_test_split(
         X_trainval, y_trainval,
-        test_size=Config.DATA_SPLIT['test_size'],
-        random_state=Config.DATA_SPLIT['random_state'],
+        test_size=0.2,
+        random_state=42,
         shuffle=False,
     )
 
@@ -236,7 +280,12 @@ def run_final_training(args):
         model.to(Config.DEVICE)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=best_params["learning_rate"])
-        criterion = nn.CrossEntropyLoss()
+        # Apply same class weights used during hyperparameter search
+        y_train_flat = y_train
+        class_counts = np.bincount(y_train_flat, minlength=Config.NUM_LABELS)
+        class_weights = len(y_train_flat) / (Config.NUM_LABELS * class_counts.astype(float))
+        weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(Config.DEVICE)
+        criterion = nn.CrossEntropyLoss(weight=weight_tensor)
 
         train_loader = DataLoader(
             TensorDataset(
@@ -279,7 +328,6 @@ def run_final_training(args):
             model=model,
             val_loader=test_loader,
             y_val_onehot=y_test,
-            number_of_labels=Config.NUM_LABELS,
             i=i,
             decision_threshold=best_params.get("decision_threshold", 0.5),
             output_dir=model_dir,

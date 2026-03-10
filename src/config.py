@@ -77,16 +77,18 @@ class Config:
     }
     
     METRICS_CONFIG = {
-        'decision_threshold_range': (0.5, 0.9),
-        'decision_threshold_step': 0.1,
+        'fall_class': 1,                          # label index that represents a fall
+        'decision_threshold_range': (0.3, 0.7),  # lower range to improve fall recall
+        'decision_threshold_step': 0.05,
         'dropout_range': (0.1, 0.5),
         'dropout_step': 0.1
     }
     
-    DATA_SPLIT = {
-        'test_size': 0.2,
-        'random_state': 42
-    }
+    N_INDIVIDUALS = 15       # total number of subjects in the dataset
+    N_TEST_INDIVIDUALS = 3   # subjects held out as the final test set (last N by group ID)
+                             # 3/15 = 20 % at the subject level — enough diversity for a
+                             # reliable test estimate while leaving 12 for LOGO (12 folds,
+                             # each training on 11 subjects)
     
     FINAL_TRAINING = {
         'num_models': 30,
@@ -96,6 +98,39 @@ class Config:
     LEARNING_CURVE_CONFIG = {
         'fractions': [0.1, 0.2, 0.4, 0.6, 0.8, 1.0],
         'epochs': 10
+    }
+
+    # Default hyperparameters used when skipping Optuna search.
+    # Values sit near the centre of each search range and are reasonable
+    # starting points for all scenarios.
+    DEFAULT_PARAMS = {
+        'CNN1D': {
+            'model_type':        'CNN1D',
+            'learning_rate':     1e-3,
+            'dropout':           0.3,
+            'decision_threshold': 0.5,
+            'filter_size':       64,
+            'kernel_size':       5,
+            'num_layers':        2,
+            'num_dense_layers':  1,
+            'dense_neurons':     128,
+        },
+        'MLP': {
+            'model_type':        'MLP',
+            'learning_rate':     1e-3,
+            'dropout':           0.3,
+            'decision_threshold': 0.5,
+            'num_layers':        2,
+            'dense_neurons':     128,
+        },
+        'LSTM': {
+            'model_type':        'LSTM',
+            'learning_rate':     1e-3,
+            'dropout':           0.3,
+            'decision_threshold': 0.5,
+            'hidden_dim':        64,
+            'num_layers':        2,
+        },
     }
     
     @classmethod
