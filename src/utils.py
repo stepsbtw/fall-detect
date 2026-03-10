@@ -32,7 +32,7 @@ from config import Config
 # TREINAMENTO E VALIDAÇÃO
 # =============================================================================
 
-def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=25, early_stopping=False, patience=5, scaler=None, trial=None):
+def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=25, early_stopping=False, patience=5, scaler=None, trial=None, step_offset=0):
     """
     Treina modelo com early stopping, mixed precision e pruning opcional
     """
@@ -94,7 +94,7 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
 
         # Pruning intermediário (se trial fornecido)
         if trial is not None:
-            trial.report(avg_val_loss, epoch)
+            trial.report(avg_val_loss, step_offset + epoch)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
 
@@ -235,7 +235,8 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
             epochs=Config.TRAINING_CONFIG['epochs'], 
             early_stopping=Config.TRAINING_CONFIG['early_stopping'], 
             patience=Config.TRAINING_CONFIG['patience'], 
-            trial=trial
+            trial=trial,
+            step_offset=fold_idx * Config.TRAINING_CONFIG['epochs']
         )
 
         all_train_losses.append(train_losses)
