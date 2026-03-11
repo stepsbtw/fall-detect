@@ -18,7 +18,7 @@ Suporta **3 arquiteturas de redes neurais** (CNN1D, MLP, LSTM) e **3 modelos cl�
 - **6 Posições de Sensor**: individuais (chest, left, right) e fusões (chest\_left, chest\_right, chest\_left\_right)
 - **Domínio Temporal e de Frequência**: todos os cenários disponíveis nos dois domínios
 - **Validação Cruzada LOGO**: Leave-One-Subject-Out por participante
-- **Duas estratégias de avaliação**: holdout fixo de 3 sujeitos + LOGO aninhado (ver abaixo)
+- **Duas estratégias de avaliação**: LOGO com HPs pré-buscados (`train`) + LOGO aninhado com GroupKFold interno (`nested`)
 - **Split por Indivíduo**: Separação treino/val e teste feita a nível de participante (sem vazamento de dados)
 - **Explicabilidade**: Análise SHAP
 - **Curvas de Aprendizado**: Análise de performance vs. quantidade de dados
@@ -84,42 +84,44 @@ O arquivo `src/config.py` centraliza todas as configurações:
 - **Hiperparâmetros**: Ranges para otimização por arquitetura (`MODEL_CONFIGS`)
 - **Parâmetros Padrão**: `DEFAULT_PARAMS` por modelo, usado quando não há busca Optuna
 - **Treinamento**: epochs, patience, batch\_size, etc.
-- **Split de dados**: 15 indivíduos; estratégia depende do modo (ver Pipeline abaixo)
+- **Split de dados**: 15 indivíduos; outer loop sempre LOGO; inner loop GroupKFold(k=3) ou nenhum (ver Pipeline abaixo)
 - **Modelos clássicos**: `CLASSICAL_MODELS = {"RF", "SVM", "XGBoost"}`
 
 ## Estratégias de Avaliação
 
-O pipeline oferece duas estratégias, ambas sem vazamento de dados entre sujeitos:
+O pipeline oferece duas estratégias, ambas com outer LOGO sobre todos os sujeitos:
 
-### Holdout Fixo (`search` + `train`)
+### `search` + `train` — LOGO sem loop interno
 
 ```
 15 sujeitos
-├── 3 sujeitos de teste (fixos, bloqueados desde o início)
-└── 12 sujeitos de treino/val
-      ├── Optuna: LOGO 12-fold → seleciona HPs
-      └── train: LOGO 12-fold (11 treino / 1 val para early stopping)
-                 → avalia nos 3 sujeitos de teste fixos
-                 → reporta média ± desvio sobre os 12 folds
+└── search: Optuna com GroupKFold(k=3) sobre todos os sujeitos → HPs globais
+
+15 sujeitos
+└── train: LOGO externo (N-fold):
+      para cada fold (sujeito i):
+        treina em N-1 sujeitos
+        avalia no sujeito i (também usado para early stopping)
+      → reporta média ± desvio sobre os N folds
 ```
 
 **Prós:** 1 rodada Optuna; rápido.  
-**Contra:** métrica final baseada em apenas 3 sujeitos.
+**Atenção:** HPs selecionados com todos os sujeitos; val = test dentro de cada fold.
 
-### LOGO Aninhado (`nested`) — padrão ouro
+### `nested` — LOGO aninhado com GroupKFold interno (padrão ouro)
 
 ```
 15 sujeitos
-└── LOGO externo (15-fold):
-      para cada fold externo (sujeito i de teste):
-        └── Optuna: LOGO interno sobre 14 sujeitos → HPs para este fold
-            treina com esses HPs
+└── LOGO externo (N-fold):
+      para cada fold (sujeito i de teste):
+        └── Optuna interno: GroupKFold(k=3) sobre N-1 sujeitos → HPs para este fold
+            treina com esses HPs em N-1 sujeitos
             avalia no sujeito i
-      → reporta média ± desvio sobre os 15 folds
+      → reporta média ± desvio sobre os N folds
 ```
 
-**Prós:** zero leakage de HPs; todos os 15 sujeitos contribuem para o teste.  
-**Contra:** 15× mais compute (15 rodadas Optuna).
+**Prós:** zero leakage de HPs; todos os sujeitos contribuem para o teste.  
+**Contra:** N× mais compute (N rodadas Optuna).
 
 ## Pipeline de Treinamento (`pipeline.py`)
 

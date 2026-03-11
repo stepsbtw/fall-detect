@@ -22,7 +22,7 @@ import csv
 from neural_networks import CNN1DNet, MLPNet, LSTMNet
 import optuna.visualization as vis
 import random
-from sklearn.model_selection import LeaveOneGroupOut
+from sklearn.model_selection import LeaveOneGroupOut, GroupKFold, GroupShuffleSplit
 from sklearn.metrics import f1_score, fbeta_score
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
@@ -141,9 +141,13 @@ def train(model, train_loader, val_loader, optimizer, criterion, device, epochs=
 # OTIMIZAÇÃO COM OPTUNA
 # =============================================================================
 
-def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_dir, num_labels, device, restrict_model_type=None):
+def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_dir, num_labels, device, restrict_model_type=None, inner_cv='kfold'):
     """
     Função objetivo para otimização com Optuna
+    
+    inner_cv: 'kfold'   → GroupKFold(k=3)
+              'holdout' → GroupShuffleSplit(n=1, test_size=1/3)
+              'none'    → no split; train and score on all inner data
     """
     print(f"\nIniciando Trial #{trial.number}\n")
 
@@ -161,11 +165,22 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
     all_train_losses = []
     all_val_losses = []
 
-    logo = LeaveOneGroupOut()
-    n_folds = logo.get_n_splits(groups=groups)
+    if inner_cv == 'none':
+        all_idx = np.arange(len(X_trainval))
+        splits = [(all_idx, all_idx)]
+        n_folds = 1
+        print(f" Trial #{trial.number} — inner_cv=none (in-sample, {len(X_trainval)} samples)")
+    else:
+        if inner_cv == 'holdout':
+            cv = GroupShuffleSplit(n_splits=1, test_size=1/3, random_state=Config.SEED)
+        else:
+            cv = GroupKFold(n_splits=3)
+        n_folds = cv.get_n_splits(X_trainval, y_trainval, groups)
+        splits = list(cv.split(X_trainval, y_trainval, groups))
 
-    for fold_idx, (train_idx, val_idx) in enumerate(logo.split(X_trainval, y_trainval, groups)):
-        print(f"\n Fold {fold_idx + 1}/{n_folds} — left-out group {groups[val_idx[0]]} ({model_type})")
+    for fold_idx, (train_idx, val_idx) in enumerate(splits):
+        val_groups = np.unique(groups[val_idx]).tolist() if inner_cv != 'none' else ['all']
+        print(f"\n Fold {fold_idx + 1}/{n_folds} — val groups {val_groups} ({model_type})")
 
         # Definir seeds para reprodutibilidade
         Config.set_seed(Config.SEED + fold_idx)
@@ -413,9 +428,13 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
 
     return mean_f2
 
-def run_optuna(input_shape_dict, X_trainval, y_trainval, groups, output_dir, num_labels, device, study_name, restrict_model_type=None):
+def run_optuna(input_shape_dict, X_trainval, y_trainval, groups, output_dir, num_labels, device, study_name, restrict_model_type=None, inner_cv='kfold'):
     """
-    Executa otimização com Optuna usando Leave-One-Group-Out CV
+    Executa otimização com Optuna
+
+    inner_cv: 'kfold'   → GroupKFold(k=3) inside each Optuna trial
+              'holdout' → GroupShuffleSplit(n=1, test_size=1/3) inside each trial
+              'none'    → no split; train and score on all inner data
     """
     os.makedirs(output_dir, exist_ok=True)
     db_path = os.path.join(output_dir, "optuna_study.db")
@@ -449,7 +468,8 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, groups, output_dir, num
         output_dir,
         num_labels,
         device,
-        restrict_model_type
+        restrict_model_type,
+        inner_cv,
     ), n_trials=Config.OPTUNA_CONFIG['n_trials'], n_jobs=Config.OPTUNA_CONFIG['n_jobs'])
 
     print("Melhor MCC:", study.best_value)
