@@ -45,7 +45,7 @@ def _print_best_params(model_type, best_value, best_params):
     print("MELHORES HIPERPARÂMETROS ENCONTRADOS")
     print(f"{'='*50}")
     print(f"Modelo: {model_type}")
-    print(f"Melhor MCC: {best_value:.4f}")
+    print(f"Melhor F1: {best_value:.4f}")
     for key, value in best_params.items():
         print(f"  {key}: {value}")
     print()

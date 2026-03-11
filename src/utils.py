@@ -23,7 +23,7 @@ from neural_networks import CNN1DNet, MLPNet, LSTMNet
 import optuna.visualization as vis
 import random
 from sklearn.model_selection import LeaveOneGroupOut, GroupKFold, GroupShuffleSplit
-from sklearn.metrics import f1_score, fbeta_score
+from sklearn.metrics import f1_score
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from xgboost import XGBClassifier
@@ -161,7 +161,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
         learning_rate = trial.suggest_float('learning_rate', Config.OPTIMIZER_CONFIG['lr_range'][0], Config.OPTIMIZER_CONFIG['lr_range'][1], log=Config.OPTIMIZER_CONFIG['lr_log'])
     decision_threshold = trial.suggest_float('decision_threshold', Config.METRICS_CONFIG['decision_threshold_range'][0], Config.METRICS_CONFIG['decision_threshold_range'][1], step=Config.METRICS_CONFIG['decision_threshold_step'])
 
-    f2_scores = []
+    f1_scores = []
     all_train_losses = []
     all_val_losses = []
 
@@ -236,11 +236,11 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
 
             y_probs_cl    = clf.predict_proba(X_val_flat)
             y_pred_thresh = (y_probs_cl[:, 1] >= decision_threshold).astype(int)
-            f2 = fbeta_score(y_val_flat, y_pred_thresh, beta=2, pos_label=fall_class, zero_division=0)
-            f2_scores.append(f2)
+            f1 = f1_score(y_val_flat, y_pred_thresh, pos_label=fall_class, zero_division=0)
+            f1_scores.append(f1)
 
             # Report fold-level metric for pruner (inverted: lower = better)
-            trial.report(1.0 - f2, fold_idx)
+            trial.report(1.0 - f1, fold_idx)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
 
@@ -358,9 +358,9 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
                     probs = F.softmax(out, dim=1)[:, 1].cpu().numpy()
                     y_probs.extend(probs)
             y_pred_thresh = (np.array(y_probs) >= decision_threshold).astype(int)
-            f2 = fbeta_score(y_true, y_pred_thresh, beta=2, pos_label=fall_class, zero_division=0)
+            f1 = f1_score(y_true, y_pred_thresh, pos_label=fall_class, zero_division=0)
 
-            f2_scores.append(f2)
+            f1_scores.append(f1)
 
             # Pruning check após cada fold
             if trial.should_prune():
@@ -370,8 +370,8 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
             del optimizer
             torch.cuda.empty_cache()
 
-    mean_f2 = np.mean(f2_scores)
-    print(f"Trial {trial.number} - Média F2 (fall): {mean_f2:.4f}")
+    mean_f1 = np.mean(f1_scores)
+    print(f"Trial {trial.number} - Média F1 (fall): {mean_f1:.4f}")
 
     # Salvar resumo do trial
     trial_dir = os.path.join(output_dir, f"trial_{trial.number}")
@@ -381,8 +381,8 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
         "trial_number": trial.number,
         "model_type": model_type,
         "params": {"decision_threshold": decision_threshold},
-        "mean_f2": float(mean_f2),
-        "f2_scores": f2_scores
+        "mean_f1": float(mean_f1),
+        "f1_scores": f1_scores
     }
 
     if not is_classical:
@@ -426,7 +426,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
     with open(os.path.join(trial_dir, "trial_summary.json"), "w") as f:
         json.dump(summary, f, indent=4)
 
-    return mean_f2
+    return mean_f1
 
 def run_optuna(input_shape_dict, X_trainval, y_trainval, groups, output_dir, num_labels, device, study_name, restrict_model_type=None, inner_cv='kfold'):
     """
@@ -472,7 +472,7 @@ def run_optuna(input_shape_dict, X_trainval, y_trainval, groups, output_dir, num
         inner_cv,
     ), n_trials=Config.OPTUNA_CONFIG['n_trials'], n_jobs=Config.OPTUNA_CONFIG['n_jobs'])
 
-    print("Melhor MCC:", study.best_value)
+    print("Melhor F1:", study.best_value)
     print("Melhores hiperparâmetros:", study.best_params)
 
     # Salvar resultados
@@ -675,13 +675,15 @@ def calculate_metrics(tp, tn, fp, fn, y_true, y_pred):
     specificity = tn / (tn + fp + 1e-10)
     precision = tp / (tp + fp + 1e-10)
     accuracy = (tp + tn) / (tp + tn + fp + fn + 1e-10)
+    f1 = f1_score(y_true, y_pred, pos_label=Config.METRICS_CONFIG['fall_class'], zero_division=0)
 
     return {
         "MCC": mcc,
         "Sensitivity": sensitivity,
         "Specificity": specificity,
         "Precision": precision,
-        "Accuracy": accuracy
+        "Accuracy": accuracy,
+        "F1": f1
     }
 
 def record_metrics(metrics, tp, tn, fp, fn, i, output_dir):
@@ -691,7 +693,7 @@ def record_metrics(metrics, tp, tn, fp, fn, i, output_dir):
     path = os.path.join(output_dir, f"metrics_model_{i}.csv")
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=[
-            "Model", "MCC", "Sensitivity", "Specificity", "Precision", "Accuracy", "tp", "tn", "fp", "fn"
+            "Model", "MCC", "Sensitivity", "Specificity", "Precision", "Accuracy", "F1", "tp", "tn", "fp", "fn"
         ])
         writer.writeheader()
         writer.writerow({
@@ -701,6 +703,7 @@ def record_metrics(metrics, tp, tn, fp, fn, i, output_dir):
             "Specificity": metrics["Specificity"],
             "Precision": metrics["Precision"],
             "Accuracy": metrics["Accuracy"],
+            "F1": metrics["F1"],
             "tp": tp,
             "tn": tn,
             "fp": fp,

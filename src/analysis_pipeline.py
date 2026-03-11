@@ -54,7 +54,7 @@ def run_shap(args):
     if not os.path.exists(all_metrics_path):
         raise FileNotFoundError(f"Arquivo de métricas não encontrado: {all_metrics_path}")
     metrics_df = pd.read_csv(all_metrics_path)
-    best_idx = metrics_df["MCC"].idxmax() + 1
+    best_idx = metrics_df["F1"].idxmax() + 1
     best_model_path = os.path.join(base_out, f"model_{best_idx}", f"model_{best_idx}.pt")
     model = load_model_state(model, best_model_path, device=str(device))
     model.to(device)
@@ -164,7 +164,7 @@ def _create_metric_visualizations(df, base_out):
     plt.style.use('default')
     sns.set_palette("husl")
 
-    metrics_cols = [c for c in ['MCC', 'Accuracy', 'Precision', 'Sensitivity', 'Specificity']
+    metrics_cols = [c for c in ['F1', 'Accuracy', 'Precision', 'Sensitivity', 'Specificity', 'MCC']
                     if c in df.columns]
 
     if metrics_cols:
@@ -178,31 +178,31 @@ def _create_metric_visualizations(df, base_out):
         plt.savefig(os.path.join(base_out, "metrics_boxplot.png"), dpi=300, bbox_inches='tight')
         plt.close()
 
-    if 'MCC' in df.columns:
+    if 'F1' in df.columns:
         plt.figure(figsize=(10, 6))
-        plt.hist(df['MCC'], bins=15, alpha=0.7, edgecolor='black')
-        plt.axvline(df['MCC'].mean(), color='red', linestyle='--',
-                    label=f'Média: {df["MCC"].mean():.4f}')
-        plt.axvline(df['MCC'].median(), color='green', linestyle='--',
-                    label=f'Mediana: {df["MCC"].median():.4f}')
-        plt.xlabel('MCC', fontsize=12)
+        plt.hist(df['F1'], bins=15, alpha=0.7, edgecolor='black')
+        plt.axvline(df['F1'].mean(), color='red', linestyle='--',
+                    label=f'Média: {df["F1"].mean():.4f}')
+        plt.axvline(df['F1'].median(), color='green', linestyle='--',
+                    label=f'Mediana: {df["F1"].median():.4f}')
+        plt.xlabel('F1-Score', fontsize=12)
         plt.ylabel('Frequência', fontsize=12)
-        plt.title('Distribuição do MCC dos Modelos Finais', fontsize=14, fontweight='bold')
+        plt.title('Distribuição do F1-Score dos Modelos Finais', fontsize=14, fontweight='bold')
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(os.path.join(base_out, "mcc_histogram.png"), dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(base_out, "f1_histogram.png"), dpi=300, bbox_inches='tight')
         plt.close()
 
-    if 'MCC' in df.columns and 'Accuracy' in df.columns:
+    if 'F1' in df.columns and 'Accuracy' in df.columns:
         plt.figure(figsize=(10, 6))
-        plt.scatter(df['Accuracy'], df['MCC'], alpha=0.7, s=50)
+        plt.scatter(df['Accuracy'], df['F1'], alpha=0.7, s=50)
         plt.xlabel('Accuracy', fontsize=12)
-        plt.ylabel('MCC', fontsize=12)
-        plt.title('MCC vs Accuracy dos Modelos Finais', fontsize=14, fontweight='bold')
+        plt.ylabel('F1-Score', fontsize=12)
+        plt.title('F1-Score vs Accuracy dos Modelos Finais', fontsize=14, fontweight='bold')
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(os.path.join(base_out, "mcc_vs_accuracy.png"), dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(base_out, "f1_vs_accuracy.png"), dpi=300, bbox_inches='tight')
         plt.close()
 
     if len(metrics_cols) > 1:
@@ -231,7 +231,7 @@ def _aggregate_model_metrics(base_out):
             try:
                 df = pd.read_csv(metrics_file)
                 all_metrics.append(df)
-                print(f"Modelo {i}: MCC={df['MCC'].iloc[0]:.4f}, Acc={df['Accuracy'].iloc[0]:.4f}")
+                print(f"Modelo {i}: F1={df['F1'].iloc[0]:.4f}, Acc={df['Accuracy'].iloc[0]:.4f}")
             except Exception as e:
                 print(f"Erro ao ler métricas do modelo {i}: {e}")
         else:
@@ -244,7 +244,7 @@ def _aggregate_model_metrics(base_out):
     combined_df = pd.concat(all_metrics, ignore_index=True)
     combined_df['Model'] = combined_df['Model'].astype(float)
 
-    expected_columns = ['Model', 'MCC', 'Sensitivity', 'Specificity', 'Precision', 'Accuracy',
+    expected_columns = ['Model', 'MCC', 'Sensitivity', 'Specificity', 'Precision', 'Accuracy', 'F1',
                         'tp', 'tn', 'fp', 'fn']
     combined_df = combined_df[[c for c in expected_columns if c in combined_df.columns]]
 
@@ -316,10 +316,7 @@ def _analyze_final_models(df, output_dir):
         if not row["all_metrics"]:
             continue
         metrics_df = pd.read_csv(row["all_metrics"])
-        if "Precision" in metrics_df.columns and "Sensitivity" in metrics_df.columns:
-            p, r = metrics_df["Precision"], metrics_df["Sensitivity"]
-            metrics_df["F1"] = (2 * p * r / (p + r)).fillna(0)
-        metricas_plot = [c for c in ["MCC", "Accuracy", "Precision", "Sensitivity", "Specificity", "F1"]
+        metricas_plot = [c for c in ["F1", "Accuracy", "Precision", "Sensitivity", "Specificity", "MCC"]
                          if c in metrics_df.columns]
         if not metricas_plot:
             print(f"Nenhuma métrica reconhecida em {row['all_metrics']}, pulando.")
@@ -377,7 +374,7 @@ def _analyze_learning_curves(df, output_dir):
         title_base = tag.replace('_', ' ')
 
         plt.figure(figsize=(10, 7))
-        for col in ["MCC", "F1", "Accuracy"]:
+        for col in ["F1", "Accuracy", "MCC"]:
             if col in lc_df.columns:
                 plt.plot(lc_df["Fraction"] * 100, lc_df[col], marker='o', label=col)
         plt.xlabel("Porcentagem de Dados de Treino (%)")
@@ -480,9 +477,9 @@ def _centralize_best_model_outputs(df, output_dir):
         if not row["all_metrics"] or not os.path.exists(row["all_metrics"]):
             continue
         metrics_df = pd.read_csv(row["all_metrics"])
-        if "MCC" not in metrics_df.columns:
+        if "F1" not in metrics_df.columns:
             continue
-        best_idx = str(metrics_df["MCC"].idxmax() + 1)
+        best_idx = str(metrics_df["F1"].idxmax() + 1)
         exp_dir = os.path.dirname(row["summary_metrics"])
         tag = f"{row['model_type']}_{row['position']}_{row['scenario']}_{row['label_type']}"
         for folder, pattern in file_patterns.items():
