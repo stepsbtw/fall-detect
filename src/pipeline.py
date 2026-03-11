@@ -88,10 +88,14 @@ def run_final_training(args):
         Config.set_seed(Config.FINAL_TRAINING['seed_offset'])
         for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
             left_out = groups[test_idx[0]]
-            print(f"  Fold {fold_idx+1}/{n_folds} — sujeito de teste: {left_out}")
             fold_dir = os.path.join(base_out, f"fold_s{left_out}")
-            os.makedirs(fold_dir, exist_ok=True)
             fold_label = f"s{left_out}"
+            done_marker = os.path.join(fold_dir, f"metrics_model_{fold_label}.csv")
+            if os.path.exists(done_marker):
+                print(f"  Fold s{left_out} já concluído — pulando.")
+                continue
+            print(f"  Fold {fold_idx+1}/{n_folds} — sujeito de teste: {left_out}")
+            os.makedirs(fold_dir, exist_ok=True)
             X_tr = X[train_idx].reshape(len(train_idx), -1)
             y_tr = y[train_idx]
             X_te = X[test_idx].reshape(len(test_idx), -1)
@@ -114,10 +118,14 @@ def run_final_training(args):
     Config.set_seed(Config.FINAL_TRAINING['seed_offset'])
     for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
         left_out = groups[test_idx[0]]
-        print(f"\n  Fold {fold_idx+1}/{n_folds} — sujeito de teste: {left_out}")
         fold_dir = os.path.join(base_out, f"fold_s{left_out}")
-        os.makedirs(fold_dir, exist_ok=True)
         fold_label = f"s{left_out}"
+        done_marker = os.path.join(fold_dir, f"metrics_model_{fold_label}.csv")
+        if os.path.exists(done_marker):
+            print(f"\n  Fold s{left_out} já concluído — pulando.")
+            continue
+        print(f"\n  Fold {fold_idx+1}/{n_folds} — sujeito de teste: {left_out}")
+        os.makedirs(fold_dir, exist_ok=True)
 
         X_train = X[train_idx]
         y_train = y[train_idx]
