@@ -25,8 +25,13 @@ import random
 from sklearn.model_selection import LeaveOneGroupOut, GroupKFold, GroupShuffleSplit
 from sklearn.metrics import f1_score
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.svm import SVC
+from sklearn.svm import LinearSVC
+from sklearn.calibration import CalibratedClassifierCV
 from xgboost import XGBClassifier
+try:
+    from catboost import CatBoostClassifier
+except ImportError:
+    CatBoostClassifier = None
 import joblib
 import json
 import seaborn as sns
@@ -195,7 +200,7 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
         os.makedirs(fold_dir, exist_ok=True)
 
         if is_classical:
-            # ── Classical model (RF / SVM / XGBoost) ───────────────────────────
+            # ── Classical model (RF / SVM / XGBoost / CatBoost) ─────────────────
             X_train_flat = X_train.reshape(len(X_train), -1)
             X_val_flat   = X_val.reshape(len(X_val),   -1)
 
@@ -211,10 +216,12 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
                 )
             elif model_type == "SVM":
                 svm_cfg = Config.MODEL_CONFIGS['SVM']
-                C      = trial.suggest_float("C",      svm_cfg['C_range'][0], svm_cfg['C_range'][1], log=True)
-                kernel = trial.suggest_categorical("kernel", svm_cfg['kernel_choices'])
-                clf = SVC(C=C, kernel=kernel, probability=True,
-                          class_weight='balanced', random_state=Config.SEED + fold_idx)
+                C = trial.suggest_float("C", svm_cfg['C_range'][0], svm_cfg['C_range'][1], log=True)
+                clf = CalibratedClassifierCV(
+                    LinearSVC(C=C, class_weight='balanced', dual='auto',
+                              max_iter=2000, random_state=Config.SEED + fold_idx),
+                    cv=3, method='sigmoid',
+                )
             elif model_type == "XGBoost":
                 xgb_cfg          = Config.MODEL_CONFIGS['XGBoost']
                 n_estimators     = trial.suggest_int("n_estimators",  xgb_cfg['n_estimators_range'][0],    xgb_cfg['n_estimators_range'][1],    log=True)
@@ -228,6 +235,35 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
                     learning_rate=learning_rate_xg, subsample=subsample,
                     colsample_bytree=colsample_bytree, scale_pos_weight=scale_pos_weight,
                     eval_metric='logloss', random_state=Config.SEED + fold_idx, n_jobs=-1,
+                )
+            elif model_type == "CatBoost":
+                if CatBoostClassifier is None:
+                    raise ImportError("CatBoost não está instalado. Instale com: pip install catboost")
+                cb_cfg = Config.MODEL_CONFIGS['CatBoost']
+                n_estimators = trial.suggest_int(
+                    "n_estimators", cb_cfg['n_estimators_range'][0], cb_cfg['n_estimators_range'][1], log=True
+                )
+                depth = trial.suggest_int("depth", cb_cfg['depth_range'][0], cb_cfg['depth_range'][1])
+                learning_rate_cb = trial.suggest_float(
+                    "learning_rate", cb_cfg['learning_rate_range'][0], cb_cfg['learning_rate_range'][1], log=True
+                )
+                l2_leaf_reg = trial.suggest_float(
+                    "l2_leaf_reg", cb_cfg['l2_leaf_reg_range'][0], cb_cfg['l2_leaf_reg_range'][1], log=True
+                )
+                class_weights = [
+                    1.0,
+                    max(float((y_train_flat == 0).sum()) / max(float((y_train_flat == 1).sum()), 1.0), 1.0),
+                ]
+                clf = CatBoostClassifier(
+                    iterations=n_estimators,
+                    depth=depth,
+                    learning_rate=learning_rate_cb,
+                    l2_leaf_reg=l2_leaf_reg,
+                    class_weights=class_weights,
+                    loss_function='Logloss',
+                    eval_metric='F1',
+                    random_seed=Config.SEED + fold_idx,
+                    verbose=False,
                 )
 
             clf.fit(X_train_flat, y_train_flat)
@@ -422,6 +458,13 @@ def objective(trial, input_shape_dict, X_trainval, y_trainval, groups, output_di
             "subsample": subsample,
             "colsample_bytree": colsample_bytree,
         })
+    elif model_type == "CatBoost":
+        summary["params"].update({
+            "n_estimators": n_estimators,
+            "depth": depth,
+            "learning_rate": learning_rate_cb,
+            "l2_leaf_reg": l2_leaf_reg,
+        })
 
     with open(os.path.join(trial_dir, "trial_summary.json"), "w") as f:
         json.dump(summary, f, indent=4)
@@ -540,7 +583,7 @@ def save_results(model, val_loader, y_val_onehot, i, decision_threshold, output_
 
 def save_results_classical(clf, X_test_flat, y_test, decision_threshold, i, output_dir):
     """
-    Salva resultados completos para modelos clássicos (sklearn / XGBoost).
+    Salva resultados completos para modelos clássicos (sklearn / XGBoost / CatBoost).
     Interface espelha save_results para que o pipeline trate ambos os tipos
     de forma uniforme.
     """
@@ -573,7 +616,7 @@ def save_results_classical(clf, X_test_flat, y_test, decision_threshold, i, outp
 def _make_classical_model(model_type, params, y_train):
     """
     Instancia um classificador clássico a partir de um dict de parâmetros.
-    y_train é usado apenas para calcular scale_pos_weight do XGBoost.
+    y_train é usado para calcular pesos de classe em modelos de boosting.
     """
     if model_type == "RF":
         return RandomForestClassifier(
@@ -585,12 +628,15 @@ def _make_classical_model(model_type, params, y_train):
             n_jobs=-1,
         )
     elif model_type == "SVM":
-        return SVC(
-            C=float(params.get("C", 1.0)),
-            kernel=params.get("kernel", "rbf"),
-            probability=True,
-            class_weight="balanced",
-            random_state=Config.SEED,
+        return CalibratedClassifierCV(
+            LinearSVC(
+                C=float(params.get("C", 1.0)),
+                class_weight="balanced",
+                dual="auto",
+                max_iter=2000,
+                random_state=Config.SEED,
+            ),
+            cv=3, method='sigmoid',
         )
     elif model_type == "XGBoost":
         scale_pos_weight = int((y_train == 0).sum()) / max(int((y_train == 1).sum()), 1)
@@ -604,6 +650,24 @@ def _make_classical_model(model_type, params, y_train):
             eval_metric="logloss",
             random_state=Config.SEED,
             n_jobs=-1,
+        )
+    elif model_type == "CatBoost":
+        if CatBoostClassifier is None:
+            raise ImportError("CatBoost não está instalado. Instale com: pip install catboost")
+        class_weights = [
+            1.0,
+            max(float((y_train == 0).sum()) / max(float((y_train == 1).sum()), 1.0), 1.0),
+        ]
+        return CatBoostClassifier(
+            iterations=int(params.get("n_estimators", 200)),
+            depth=int(params.get("depth", 6)),
+            learning_rate=float(params.get("learning_rate", 0.1)),
+            l2_leaf_reg=float(params.get("l2_leaf_reg", 3.0)),
+            class_weights=class_weights,
+            loss_function="Logloss",
+            eval_metric="F1",
+            random_seed=Config.SEED,
+            verbose=False,
         )
     else:
         raise ValueError(f"Unknown classical model type: {model_type}")

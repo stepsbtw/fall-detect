@@ -11,7 +11,6 @@ Usage:
 import argparse
 import os
 import glob
-import shutil
 import numpy as np
 import torch
 import matplotlib
@@ -225,24 +224,25 @@ def _aggregate_model_metrics(base_out):
     print(f"\n{'='*50}\nAGREGANDO MÉTRICAS DOS MODELOS FINAIS\n{'='*50}")
 
     all_metrics = []
-    for i in range(1, 21):
-        metrics_file = os.path.join(base_out, f"model_{i}", f"metrics_model_{i}.csv")
+    fold_dirs = sorted(glob.glob(os.path.join(base_out, "fold_s*")))
+    for fold_dir in fold_dirs:
+        subject_id = os.path.basename(fold_dir)[len("fold_"):]  # e.g. "s1"
+        metrics_file = os.path.join(fold_dir, f"metrics_model_{subject_id}.csv")
         if os.path.exists(metrics_file):
             try:
                 df = pd.read_csv(metrics_file)
                 all_metrics.append(df)
-                print(f"Modelo {i}: F1={df['F1'].iloc[0]:.4f}, Acc={df['Accuracy'].iloc[0]:.4f}")
+                print(f"Fold {subject_id}: F1={df['F1'].iloc[0]:.4f}, Acc={df['Accuracy'].iloc[0]:.4f}")
             except Exception as e:
-                print(f"Erro ao ler métricas do modelo {i}: {e}")
+                print(f"Erro ao ler métricas do fold {subject_id}: {e}")
         else:
-            print(f"Arquivo não encontrado para modelo {i}: {metrics_file}")
+            print(f"Arquivo não encontrado para fold {subject_id}: {metrics_file}")
 
     if not all_metrics:
         print("Nenhuma métrica encontrada!")
         return False
 
     combined_df = pd.concat(all_metrics, ignore_index=True)
-    combined_df['Model'] = combined_df['Model'].astype(float)
 
     expected_columns = ['Model', 'MCC', 'Sensitivity', 'Specificity', 'Precision', 'Accuracy', 'F1',
                         'tp', 'tn', 'fp', 'fn']
@@ -282,15 +282,16 @@ def _scan_output_dir(base_dir="output"):
     for root, dirs, files in os.walk(base_dir):
         if "summary_metrics.csv" not in files:
             continue
-        parts = root.split(os.sep)
-        if len(parts) < 5:
+        parts = root.replace("\\", "/").split("/")
+        if len(parts) < 3:
             continue
-        nn, position, scenario, label = parts[-4:]
+        nn = parts[-2]
+        scenario = parts[-1]
         results.append({
             "model_type": nn,
-            "position": position,
+            "position": "",
             "scenario": scenario,
-            "label_type": label,
+            "label_type": "",
             "summary_metrics": os.path.join(root, "summary_metrics.csv"),
             "all_metrics": os.path.join(root, "all_metrics.csv") if "all_metrics.csv" in files else None,
             "learning_curve": os.path.join(root, "learning_curve_metrics.csv") if "learning_curve_metrics.csv" in files else None,
@@ -322,7 +323,7 @@ def _analyze_final_models(df, output_dir):
             print(f"Nenhuma métrica reconhecida em {row['all_metrics']}, pulando.")
             continue
 
-        tag = f"{row['model_type']}_{row['position']}_{row['scenario']}_{row['label_type']}"
+        tag = "_".join(x for x in [row["model_type"], row["position"], row["scenario"], row["label_type"]] if x)
 
         # All-metrics boxplot
         plt.figure()
@@ -361,63 +362,6 @@ def _analyze_final_models(df, output_dir):
     print(f"Resumo dos modelos finais salvo em: {summary_csv}")
 
 
-def _analyze_learning_curves(df, output_dir):
-    lc_root = os.path.join(output_dir, "learning_curves")
-    for sub in ("metrics", "loss"):
-        os.makedirs(os.path.join(lc_root, sub), exist_ok=True)
-
-    for _, row in df.iterrows():
-        if not row["learning_curve"]:
-            continue
-        lc_df = pd.read_csv(row["learning_curve"])
-        tag = f"{row['model_type']}_{row['position']}_{row['scenario']}_{row['label_type']}"
-        title_base = tag.replace('_', ' ')
-
-        plt.figure(figsize=(10, 7))
-        for col in ["F1", "Accuracy", "MCC"]:
-            if col in lc_df.columns:
-                plt.plot(lc_df["Fraction"] * 100, lc_df[col], marker='o', label=col)
-        plt.xlabel("Porcentagem de Dados de Treino (%)")
-        plt.ylabel("Valor da Métrica")
-        plt.title(f"Learning Curve (Métricas) - {title_base}")
-        plt.legend(); plt.grid(True); plt.tight_layout()
-        path = os.path.join(lc_root, "metrics", f"learning_curve_metrics_{tag}.png")
-        plt.savefig(path); plt.close()
-        print(f"Learning curve (métricas) salva em: {path}")
-
-        plt.figure(figsize=(10, 7))
-        for col in ["Train_Loss", "Val_Loss"]:
-            if col in lc_df.columns:
-                plt.plot(lc_df["Fraction"] * 100, lc_df[col], marker='o', label=col)
-        plt.xlabel("Porcentagem de Dados de Treino (%)")
-        plt.ylabel("Loss")
-        plt.title(f"Learning Curve (Loss) - {title_base}")
-        plt.legend(); plt.grid(True); plt.tight_layout()
-        path = os.path.join(lc_root, "loss", f"learning_curve_loss_{tag}.png")
-        plt.savefig(path); plt.close()
-        print(f"Learning curve (loss) salva em: {path}")
-
-
-def _analyze_permutation_importance(df, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    for _, row in df.iterrows():
-        if not row["permutation_importance"]:
-            continue
-        pi_df = pd.read_csv(row["permutation_importance"])
-        tag = f"{row['model_type']}_{row['position']}_{row['scenario']}_{row['label_type']}"
-        plt.figure(figsize=(10, 6))
-        for col, color in zip(["delta_mcc", "delta_f1", "delta_acc"], ["C0", "C1", "C2"]):
-            if col in pi_df.columns:
-                plt.bar(pi_df["feature"], pi_df[col], alpha=0.7,
-                        label=col.replace("delta_", "Δ").upper(), color=color)
-        plt.ylabel("Queda na métrica ao embaralhar feature")
-        plt.title(f"Permutation Importance - {tag.replace('_', ' ')}")
-        plt.legend(); plt.tight_layout()
-        path = os.path.join(output_dir, f"permutation_importance_{tag}.png")
-        plt.savefig(path); plt.close()
-        print(f"Permutation importance salva em: {path}")
-
-
 def _analyze_optuna_trials(df, output_dir):
     converg_dir = os.path.join(output_dir, "optuna", "convergencia")
     os.makedirs(converg_dir, exist_ok=True)
@@ -427,7 +371,7 @@ def _analyze_optuna_trials(df, output_dir):
         trials_df = pd.read_csv(row["optuna_trials"])
         if "value" not in trials_df.columns:
             continue
-        tag = f"{row['model_type']}_{row['position']}_{row['scenario']}_{row['label_type']}"
+        tag = "_".join(x for x in [row["model_type"], row["position"], row["scenario"], row["label_type"]] if x)
         plt.figure(figsize=(8, 5))
         plt.plot(trials_df["value"].cummax(), marker='o')
         plt.xlabel("Trial")
@@ -462,36 +406,8 @@ def _analyze_optuna_param_importance(df, output_dir):
             print(f"[WARN] Não foi possível gerar importância dos hiperparâmetros para {tag}: {e}")
 
 
-def _centralize_best_model_outputs(df, output_dir):
-    """Copy best-model artefacts into themed subfolders in the global analysis dir."""
-    file_patterns = {
-        "confusion_matrix": "confusion_matrix_model_{}.png",
-        "classification_report": "classification_report_model_{}.txt",
-        "roc_curves": "roc_curve_model_{}.png",
-        "loss_curves": "loss_curve_model_{}.png",
-    }
-    for folder in file_patterns:
-        os.makedirs(os.path.join(output_dir, folder), exist_ok=True)
-
-    for _, row in df.iterrows():
-        if not row["all_metrics"] or not os.path.exists(row["all_metrics"]):
-            continue
-        metrics_df = pd.read_csv(row["all_metrics"])
-        if "F1" not in metrics_df.columns:
-            continue
-        best_idx = str(metrics_df["F1"].idxmax() + 1)
-        exp_dir = os.path.dirname(row["summary_metrics"])
-        tag = f"{row['model_type']}_{row['position']}_{row['scenario']}_{row['label_type']}"
-        for folder, pattern in file_patterns.items():
-            src = os.path.join(exp_dir, f"model_{best_idx}", pattern.format(best_idx))
-            if os.path.exists(src):
-                shutil.copy2(src, os.path.join(output_dir, folder, f"{tag}_{pattern.format(best_idx)}"))
-
-    print(f"Arquivos do melhor modelo centralizados em: {output_dir}")
-
-
 def run_analyze(args):
-    """Run all global analysis steps over the output directory."""
+    """Run global analysis focused on summary, boxplots, and Optuna outputs."""
     df = _scan_output_dir(args.base_dir)
     print(f"Total de experimentos encontrados: {len(df)}")
     if df.empty:
@@ -499,11 +415,8 @@ def run_analyze(args):
         return
     out = args.output_dir
     _analyze_final_models(df, out)
-    _analyze_learning_curves(df, out)
-    _analyze_permutation_importance(df, out)
     _analyze_optuna_trials(df, out)
     _analyze_optuna_param_importance(df, out)
-    _centralize_best_model_outputs(df, out)
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -513,7 +426,7 @@ def build_parser():
 
     def add_scenario_nn(p, nn_required=False):
         p.add_argument("-scenario", required=True, choices=SCENARIO_CHOICES)
-        p.add_argument("--model", required=nn_required, choices=["CNN1D", "MLP", "LSTM", "RF", "SVM", "XGBoost"])
+        p.add_argument("--model", required=nn_required, choices=["CNN1D", "MLP", "LSTM", "RF", "SVM", "XGBoost", "CatBoost"])
 
     # --- shap ---
     p_shap = subparsers.add_parser("shap", help="SHAP feature importance for the best model")

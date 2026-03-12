@@ -15,8 +15,8 @@ class Config:
     DATA_PATH = os.path.normpath(os.path.join(ROOT_DIR, "..", "dataset"))
     NUM_LABELS = 2
 
-    # Models that use sklearn/XGBoost instead of PyTorch
-    CLASSICAL_MODELS = frozenset({"RF", "SVM", "XGBoost"})
+    # Models that use sklearn/XGBoost/CatBoost instead of PyTorch
+    CLASSICAL_MODELS = frozenset({"RF", "SVM", "XGBoost", "CatBoost"})
 
     # [directory_name, filename, (seq_len, num_features)]
     SCENARIOS = {
@@ -83,8 +83,7 @@ class Config:
             'min_samples_split_range': (2,  20),
         },
         'SVM': {
-            'C_range':       (0.01, 100.0),
-            'kernel_choices': ['rbf', 'linear'],
+            'C_range': (0.01, 100.0),
         },
         'XGBoost': {
             'n_estimators_range':     (50,   500),
@@ -92,6 +91,12 @@ class Config:
             'learning_rate_range':    (0.01, 0.3),
             'subsample_range':        (0.6,  1.0),
             'colsample_bytree_range': (0.6,  1.0),
+        },
+        'CatBoost': {
+            'n_estimators_range':  (50,   500),
+            'depth_range':         (3,    10),
+            'learning_rate_range': (0.01, 0.3),
+            'l2_leaf_reg_range':   (1.0,  10.0),
         },
     }
     
@@ -161,7 +166,6 @@ class Config:
             'model_type':        'SVM',
             'decision_threshold': 0.5,
             'C':                 1.0,
-            'kernel':            'rbf',
         },
         'XGBoost': {
             'model_type':        'XGBoost',
@@ -171,6 +175,14 @@ class Config:
             'learning_rate':     0.1,
             'subsample':         0.8,
             'colsample_bytree':  0.8,
+        },
+        'CatBoost': {
+            'model_type':        'CatBoost',
+            'decision_threshold': 0.5,
+            'n_estimators':      200,
+            'depth':             6,
+            'learning_rate':     0.1,
+            'l2_leaf_reg':       3.0,
         },
     }
     
@@ -208,6 +220,7 @@ class Config:
             "RF":      flat,
             "SVM":     flat,
             "XGBoost": flat,
+            "CatBoost": flat,
         }
         if model_type:
             return {model_type: full[model_type]}

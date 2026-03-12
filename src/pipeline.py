@@ -83,7 +83,7 @@ def run_final_training(args):
     n_folds = logo.get_n_splits(groups=groups)
     threshold = best_params.get("decision_threshold", 0.5)
 
-    # ── Classical models (RF / SVM / XGBoost) ──────────────────────────────
+    # ── Classical models (RF / SVM / XGBoost / CatBoost) ───────────────────
     if model_type in Config.CLASSICAL_MODELS:
         Config.set_seed(Config.FINAL_TRAINING['seed_offset'])
         for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
@@ -387,7 +387,7 @@ def build_parser():
 
     def add_common(p):
         p.add_argument("-scenario", required=True, choices=SCENARIO_CHOICES)
-        p.add_argument("--model", required=False, choices=["CNN1D", "MLP", "LSTM", "RF", "SVM", "XGBoost"])
+        p.add_argument("--model", required=False, choices=["CNN1D", "MLP", "LSTM", "RF", "SVM", "XGBoost", "CatBoost"])
 
     # --- train ---
     p_train = subparsers.add_parser("train", help="Outer LOGO with default HPs — no search, zero leakage")
