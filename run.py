@@ -21,8 +21,9 @@ Evaluation strategies
   --train:
     Outer LOGO over all subjects using Config.DEFAULT_PARAMS.
     No HP search — zero leakage by design.
-    Each fold trains on N-1 subjects and evaluates on the single left-out subject
-    (which also acts as the early-stopping val set).
+    Each fold holds out one training subject for early-stopping validation,
+    trains on the remaining N-2 subjects, and evaluates on the single left-out
+    test subject.  The test subject never influences training or stopping.
 
   --nested:
     Outer LOGO over all subjects.

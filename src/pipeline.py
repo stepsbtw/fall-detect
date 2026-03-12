@@ -8,8 +8,9 @@ Evaluation strategies
 -----------------------
   train   Outer LOGO over all subjects using Config.DEFAULT_PARAMS.
           No HP search — zero leakage by design.
-          Each fold trains on N-1 subjects and evaluates on the left-out subject
-          (which also acts as the early-stopping validation set).
+          Each fold holds out one training subject for early-stopping validation,
+          trains on N-2 subjects, and evaluates on the single left-out test subject.
+          The test subject never influences training or stopping.
 
   nested  Nested LOGO (gold standard).
           Outer LOGO over all subjects; for each outer fold a fresh inner Optuna runs
@@ -54,8 +55,9 @@ def _print_best_params(model_type, best_value, best_params):
 def run_final_training(args):
     """Outer LOGO over all subjects using Config.DEFAULT_PARAMS — no HP search.
 
-    Each fold trains on N-1 subjects and uses the single left-out subject for
-    both early-stopping validation and final test evaluation.  Zero HP leakage.
+    Each fold trains on N-2 subjects, holds out one training subject for
+    early-stopping validation, and evaluates on the single left-out test
+    subject.  The test subject never influences training or stopping.
     """
     scenario = args.scenario
     model_type_arg = args.model
@@ -127,11 +129,22 @@ def run_final_training(args):
         print(f"\n  Fold {fold_idx+1}/{n_folds} — sujeito de teste: {left_out}")
         os.makedirs(fold_dir, exist_ok=True)
 
-        X_train = X[train_idx]
-        y_train = y[train_idx]
-        # left-out subject: used for early-stopping val and as the test set
-        X_val   = X[test_idx]
-        y_val   = y[test_idx]
+        X_train_all = X[train_idx]
+        y_train_all = y[train_idx]
+        groups_train = groups[train_idx]
+
+        # Hold out one training subject for early-stopping validation
+        inner_subjects = np.unique(groups_train)
+        val_subject = inner_subjects[fold_idx % len(inner_subjects)]
+        val_mask = groups_train == val_subject
+        X_train = X_train_all[~val_mask]
+        y_train = y_train_all[~val_mask]
+        X_es    = X_train_all[val_mask]   # early-stopping set
+        y_es    = y_train_all[val_mask]
+
+        # Test set: untouched left-out subject
+        X_test  = X[test_idx]
+        y_test  = y[test_idx]
 
         model = create_model(model_type, best_params, input_shape, Config.NUM_LABELS)
         model.to(Config.DEVICE)
@@ -154,16 +167,23 @@ def run_final_training(args):
             ),
             batch_size=batch_size, shuffle=True,
         )
-        val_loader = DataLoader(
+        es_loader = DataLoader(
             TensorDataset(
-                torch.tensor(X_val, dtype=torch.float32),
-                torch.tensor(y_val, dtype=torch.long),
+                torch.tensor(X_es, dtype=torch.float32),
+                torch.tensor(y_es, dtype=torch.long),
+            ),
+            batch_size=batch_size, shuffle=False,
+        )
+        test_loader = DataLoader(
+            TensorDataset(
+                torch.tensor(X_test, dtype=torch.float32),
+                torch.tensor(y_test, dtype=torch.long),
             ),
             batch_size=batch_size, shuffle=False,
         )
 
         _, _, val_losses, train_losses = train(
-            model, train_loader, val_loader, optimizer, criterion, Config.DEVICE,
+            model, train_loader, es_loader, optimizer, criterion, Config.DEVICE,
             epochs=epochs,
             early_stopping=True,
             patience=Config.TRAINING_CONFIG['patience'],
@@ -182,8 +202,8 @@ def run_final_training(args):
 
         save_results(
             model=model,
-            val_loader=val_loader,
-            y_val_onehot=y_val,
+            val_loader=test_loader,
+            y_val_onehot=y_test,
             i=fold_label,
             decision_threshold=threshold,
             output_dir=fold_dir,

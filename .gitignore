@@ -1,16 +1,16 @@
 /__pycache__
-/.venv
-/venv
+*.pyc
 
-/database
 /dataset
-/labels_and_data
-
 /logs
+/output
+/dataset_scripts
+/analise_global
 
-*/__pycache__
-
-output/
-analise_global/
-
-Miniconda3-latest-Linux-x86_64.sh
+*.png
+*.jpg
+*.jpeg
+*.pt
+*.npy
+*.npz
+*.pkl
