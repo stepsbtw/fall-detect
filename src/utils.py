@@ -778,9 +778,9 @@ def save_classification_report(y_pred, y_true, output_dir, i):
     """
     Salva relatório de classificação
     """
-    report = classification_report(y_true, y_pred, output_dict=True)
+    report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
     with open(os.path.join(output_dir, f'classification_report_model_{i}.txt'), 'w') as f:
-        f.write(classification_report(y_true, y_pred))
+        f.write(classification_report(y_true, y_pred, zero_division=0))
 
 
 def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_shape, num_labels, best_params, device, output_dir, fractions=None, epochs=10, seed=42):
