@@ -4,25 +4,24 @@ Adaptação para o PyTorch do trabalho original: https://github.com/AILAB-CEFET-
 
 Baseado no artigo (preprint) — A Machine Learning Approach to Automatic Fall Detection of Soldiers: https://arxiv.org/abs/2501.15655v2
 
-Além da adaptação, **Leave-One-Group-Out (LOGO) Cross Validation**, o modelo LSTM e a fusão de sensores foram implementados e testados junto aos demais.
+Além da adaptação, **Leave-One-Group-Out (LOGO) Cross Validation**, o modelo LSTM, a fusão de sensores e um LOGO aninhado com busca de hiperparâmetros por fold foram implementados.
 
-Suporta **3 arquiteturas de redes neurais** (CNN1D, MLP, LSTM) e **3 modelos clássicos** (RF, SVM, XGBoost), com **otimização bayesiana de hiperparâmetros via Optuna** e suporte a parâmetros padrão sem busca prévia.
+Suporta **3 arquiteturas de redes neurais** (CNN1D, MLP, LSTM) e **4 modelos clássicos** (RF, SVM, XGBoost, CatBoost), com **otimização bayesiana de hiperparâmetros via Optuna** e suporte a parâmetros padrão sem busca prévia.
 
 ## Funcionalidades
 
 - **3 Arquiteturas de Redes Neurais**: CNN1D, MLP, LSTM (PyTorch)
-- **3 Modelos Clássicos**: Random Forest (RF), SVM, XGBoost (scikit-learn / xgboost)
-- **Otimização Bayesiana**: Via Optuna com Early Stopping e Median Pruning; **F2-score (β=2)** como objetivo (ênfase em recall para detecção de quedas)
-- **Parâmetros Padrão**: Treinamento sem busca Optuna prévia com `DEFAULT_PARAMS` por modelo
-- **Tratamento de Desbalanceamento**: `CrossEntropyLoss` ponderada (redes neurais) e `class_weight='balanced'` / `scale_pos_weight` (modelos clássicos)
-- **6 Posições de Sensor**: individuais (chest, left, right) e fusões (chest\_left, chest\_right, chest\_left\_right)
+- **4 Modelos Clássicos**: Random Forest (RF), SVM (LinearSVC), XGBoost, CatBoost
+- **Otimização Bayesiana**: Via Optuna com Early Stopping e Median Pruning; **F1-score (fall class)** como objetivo
+- **Parâmetros Padrão**: Treinamento sem busca Optuna prévia com `DEFAULT_PARAMS` por modelo (`train` mode)
+- **Tratamento de Desbalanceamento**: `CrossEntropyLoss` ponderada (redes neurais), `class_weight='balanced'` (RF/SVM) e `scale_pos_weight` (XGBoost/CatBoost)
+- **SVM Escalável**: `LinearSVC` + `CalibratedClassifierCV` — O(n×d) vs O(n²×d) do kernel RBF, adequado para entradas de alta dimensão
+- **5 Cenários ativos**: chest\_T, left\_T, right\_T, chest\_left\_T, chest\_right\_T
 - **Domínio Temporal e de Frequência**: todos os cenários disponíveis nos dois domínios
-- **Validação Cruzada LOGO**: Leave-One-Subject-Out por participante
-- **Duas estratégias de avaliação**: LOGO com HPs pré-buscados (`train`) + LOGO aninhado com GroupKFold interno (`nested`)
-- **Split por Indivíduo**: Separação treino/val e teste feita a nível de participante (sem vazamento de dados)
-- **Explicabilidade**: Análise SHAP
-- **Curvas de Aprendizado**: Análise de performance vs. quantidade de dados
-- **Análise Global**: Comparações entre modelos e cenários
+- **Validação Cruzada LOGO**: Leave-One-Subject-Out sobre todos os 15 participantes
+- **Duas estratégias de avaliação**: `train` (DEFAULT\_PARAMS, zero leakage) e `nested` (Optuna por fold, zero leakage de HPs)
+- **Zero Data Leakage**: no modo `train`, o sujeito de teste jamais influencia treino ou early stopping; no modo `nested`, busca de HPs ocorre somente nos N-1 sujeitos internos
+- **Análise Global**: Comparações entre modelos e cenários com boxplots, correlações e sumários
 
 ## Instalação e Configuração
 
@@ -61,7 +60,6 @@ python generate_datasets.py right
 ### 4. Gere os Datasets Fundidos (fusão de sensores)
 
 ```bash
-# Todas as combinações de dois ou três sensores
 python generate_fused_dataset.py --positions chest left
 python generate_fused_dataset.py --positions chest right
 python generate_fused_dataset.py --positions chest left right
@@ -82,96 +80,79 @@ O arquivo `src/config.py` centraliza todas as configurações:
 - **Seed**: Reprodutibilidade (`SEED = 42`)
 - **Cenários**: Mapeamento posição → arquivo → shape de entrada
 - **Hiperparâmetros**: Ranges para otimização por arquitetura (`MODEL_CONFIGS`)
-- **Parâmetros Padrão**: `DEFAULT_PARAMS` por modelo, usado quando não há busca Optuna
+- **Parâmetros Padrão**: `DEFAULT_PARAMS` por modelo, usado no modo `train`
 - **Treinamento**: epochs, patience, batch\_size, etc.
-- **Split de dados**: 15 indivíduos; outer loop sempre LOGO; inner loop GroupKFold(k=3) ou nenhum (ver Pipeline abaixo)
-- **Modelos clássicos**: `CLASSICAL_MODELS = {"RF", "SVM", "XGBoost"}`
+- **Modelos clássicos**: `CLASSICAL_MODELS = {"RF", "SVM", "XGBoost", "CatBoost"}`
 
 ## Estratégias de Avaliação
 
-O pipeline oferece duas estratégias, ambas com outer LOGO sobre todos os sujeitos:
+O pipeline oferece duas estratégias, ambas com outer LOGO sobre todos os 15 sujeitos:
 
-### `search` + `train` — LOGO sem loop interno
-
-```
-15 sujeitos
-└── search: Optuna com GroupKFold(k=3) sobre todos os sujeitos → HPs globais
-
-15 sujeitos
-└── train: LOGO externo (N-fold):
-      para cada fold (sujeito i):
-        treina em N-1 sujeitos
-        avalia no sujeito i (também usado para early stopping)
-      → reporta média ± desvio sobre os N folds
-```
-
-**Prós:** 1 rodada Optuna; rápido.  
-**Atenção:** HPs selecionados com todos os sujeitos; val = test dentro de cada fold.
-
-### `nested` — LOGO aninhado com GroupKFold interno (padrão ouro)
+### `train` — LOGO com DEFAULT\_PARAMS (sem busca)
 
 ```
 15 sujeitos
-└── LOGO externo (N-fold):
+└── LOGO externo (15 folds):
       para cada fold (sujeito i de teste):
-        └── Optuna interno: GroupKFold(k=3) sobre N-1 sujeitos → HPs para este fold
-            treina com esses HPs em N-1 sujeitos
-            avalia no sujeito i
-      → reporta média ± desvio sobre os N folds
+        • treina nos N-2 sujeitos restantes
+        • early stopping num sujeito de validação rotativo (dos N-1; nunca o de teste)
+        • avalia no sujeito i (jamais visto durante treino ou stopping)
+      → reporta média ± desvio sobre os 15 folds
 ```
 
-**Prós:** zero leakage de HPs; todos os sujeitos contribuem para o teste.  
-**Contra:** N× mais compute (N rodadas Optuna).
+**Prós:** rápido, sem busca Optuna; zero leakage de dados e de HPs.
+
+### `nested` — LOGO aninhado com Optuna interno (padrão ouro)
+
+```
+15 sujeitos
+└── LOGO externo (15 folds):
+      para cada fold (sujeito i de teste):
+        └── Optuna interno (GroupKFold k=3 ou holdout) sobre N-1 sujeitos → HPs deste fold
+            • treina nos N-1 sujeitos (1 retido pelo Optuna para early stopping)
+            • avalia no sujeito i
+      → reporta média ± desvio sobre os 15 folds
+```
+
+**Prós:** zero leakage de HPs; cada fold tem HPs próprios.
+**Contra:** 15× mais compute (15 rodadas Optuna).
 
 ## Pipeline de Treinamento (`pipeline.py`)
 
 Todos os comandos são executados a partir de `src/`.
 
-Os modelos disponíveis são: `CNN1D`, `MLP`, `LSTM` (redes neurais) e `RF`, `SVM`, `XGBoost` (modelos clássicos).
+Os modelos disponíveis são: `CNN1D`, `MLP`, `LSTM` (redes neurais) e `RF`, `SVM`, `XGBoost`, `CatBoost` (modelos clássicos).
 
-### 1. Busca de Hiperparâmetros (Optuna) — para estratégia holdout
-
-```bash
-python pipeline.py search -scenario <SCENARIO> --model <MODEL> [--n_trials 30] [--timeout 3600]
-```
-
-Roda LOGO sobre os **12 sujeitos de treino**. Salva `best_hyperparameters.json` e `test_data.npz` (com os 3 sujeitos de teste bloqueados).
-
-### 2. Análise Pós-Trials
+### `train` — LOGO com parâmetros padrão
 
 ```bash
-python pipeline.py post_trials -scenario <SCENARIO> --model <MODEL>
+python pipeline.py train -scenario <SCENARIO> --model <MODEL> [--epochs 200]
 ```
 
-### 3. Avaliação LOGO com Holdout Fixo (`train`)
+Executa LOGO completo (15 folds) usando `Config.DEFAULT_PARAMS`. `--epochs` é ignorado para modelos clássicos.
 
-Requer `search` executado previamente.
+### `nested` — LOGO aninhado com Optuna interno
 
 ```bash
-python pipeline.py train -scenario <SCENARIO> --model <MODEL> [--num_models 1] [--epochs 200]
+python pipeline.py nested -scenario <SCENARIO> --model <MODEL> \
+    [--n_trials 15] [--epochs 200] [--inner {kfold,holdout,none}]
 ```
 
-Cada fold treina em 11 sujeitos, usa o 12º como validação (early stopping), e avalia nos **3 sujeitos de teste fixos**.
-`--num_models` controla o número de repetições LOGO completas (padrão=1 → 12 folds).
-
-### 4. LOGO Aninhado (`nested`) — padrão ouro
-
-Autossuficiente; não requer `search` prévio.
-
-```bash
-python pipeline.py nested -scenario <SCENARIO> --model <MODEL> [--n_trials 15] [--epochs 200]
-```
-
-Para cada um dos 15 sujeitos como fold externo, roda Optuna interno sobre os 14 restantes, treina com os melhores HPs e avalia no sujeito deixado de fora.
-
-> **Nota:** para modelos clássicos (RF, SVM, XGBoost), `--epochs` é ignorado.
+| Opção | Padrão | Descrição |
+|---|---|---|
+| `--n_trials` | 15 | Trials Optuna por fold externo |
+| `--epochs` | 200 | Épocas de treino (ignorado para modelos clássicos) |
+| `--inner` | `kfold` | Estratégia interna: `kfold`=GroupKFold(k=3), `holdout`=GroupShuffleSplit(n=1), `none`=in-sample |
 
 ## Pipeline de Análise (`analysis_pipeline.py`)
+
+Todos os comandos são executados a partir de `src/`.
 
 ### SHAP — Importância de Features
 
 ```bash
-python analysis_pipeline.py shap -scenario <SCENARIO> --model <MODEL> [--background_size 100] [--sample_size 200]
+python analysis_pipeline.py shap -scenario <SCENARIO> --model <MODEL> \
+    [--background_size 100] [--sample_size 200]
 ```
 
 ### Curva de Aprendizado
@@ -180,11 +161,13 @@ python analysis_pipeline.py shap -scenario <SCENARIO> --model <MODEL> [--backgro
 python analysis_pipeline.py learning_curve -scenario <SCENARIO> --model <MODEL> [--epochs 10]
 ```
 
-### Agregar Métricas dos Modelos
+### Agregar Métricas dos Folds
 
 ```bash
 python analysis_pipeline.py aggregate -scenario <SCENARIO> --model <MODEL>
 ```
+
+Lê os CSVs de `fold_s*/metrics_model_s*.csv`, gera `all_metrics.csv`, `summary_metrics.csv` e visualizações.
 
 ### Análise Global (todos os experimentos)
 
@@ -193,8 +176,6 @@ python analysis_pipeline.py analyze [--base_dir output] [--output_dir analise_gl
 ```
 
 ## Cenários Disponíveis
-
-O nome do cenário segue o padrão `<posição>_T` (domínio temporal) ou `<posição>_F` (domínio de frequência).
 
 | Cenário | Posição | Domínio | Shape de entrada |
 |---|---|---|---|
@@ -211,12 +192,14 @@ O nome do cenário segue o padrão `<posição>_T` (domínio temporal) ou `<posi
 | `chest_left_right_T` | chest + left + right | temporal | (460, 24) |
 | `chest_left_right_F` | chest + left + right | frequência | (230, 24) |
 
+Cenários ativos por padrão em `run.py`: `chest_T`, `left_T`, `right_T`, `chest_left_T`, `chest_right_T`.
+
 ## Estrutura do Projeto
 
 ```
 fall-detect/
 ├── requirements.txt
-├── run.py                    # Script em lote: busca e/ou avaliação de todos os modelos/cenários
+├── run.py                    # Script em lote: treino e/ou análise de todos os combos
 ├── dataset/
 │   ├── 0_raw/               # Dados brutos (ID1..ID15 / CHEST, LEFT, RIGHT)
 │   ├── chest/data/ labels/  # Datasets gerados por posição
@@ -225,12 +208,14 @@ fall-detect/
 │   ├── chest_left/
 │   ├── chest_right/
 │   └── chest_left_right/
+├── logs/                     # Logs de execução por combo
+├── output/                   # Resultados organizados por modelo/cenário
 └── src/
-    ├── config.py             # Configurações centralizadas (modelos, splits, DEFAULT_PARAMS)
-    ├── pipeline.py           # CLI: search | post_trials | train | nested
+    ├── config.py             # Configurações centralizadas
+    ├── pipeline.py           # CLI: train | nested
     ├── analysis_pipeline.py  # CLI: shap | learning_curve | aggregate | analyze
-    ├── utils.py              # Loop de treino, Optuna, métricas, visualizações, modelos clássicos
-    ├── neural_networks.py    # Arquiteturas CNN1D (+ BatchNorm), MLP, LSTM
+    ├── utils.py              # Loop de treino, Optuna, métricas, visualizações
+    ├── neural_networks.py    # Arquiteturas CNN1D, MLP, LSTM
     └── data/
         ├── generate_datasets.py       # Geração de datasets (sensores individuais)
         ├── generate_fused_dataset.py  # Geração de datasets fundidos
@@ -240,120 +225,118 @@ fall-detect/
 
 ## Saídas Geradas
 
-As saídas são salvas em `output/<model>/<scenario>/`:
+As saídas são salvas em `output/<MODEL>/<SCENARIO>/`.
 
-### Holdout fixo (`train`)
-- `rep_<N>/fold_s<subject>/` — resultados por fold
-  - `losses_*.csv`, `loss_curve_*.png` — curvas de loss
-  - `confusion_matrix_*.png`, `roc_curve_*.png` — métricas visuais
-  - `metrics_*.csv` — métricas numéricas
+### Modo `train` — por fold
+```
+output/<MODEL>/<SCENARIO>/
+└── fold_s<N>/
+    ├── model_s<N>.pt / model_s<N>.pkl   # Modelo salvo
+    ├── metrics_model_s<N>.csv           # Métricas do fold
+    ├── losses_s<N>.csv                  # Loss por época
+    ├── loss_curve_s<N>.png
+    ├── confusion_matrix_model_s<N>.png
+    ├── roc_curve_model_s<N>.png
+    └── classification_report_model_s<N>.txt
+```
 
-### LOGO aninhado (`nested`)
-- `nested/outer_s<subject>/` — um diretório por fold externo
-  - `best_hyperparameters.json` — HPs selecionados pelo Optuna interno
-  - Mesmos artefatos de métricas do modo `train`
+### Modo `nested` — por fold externo
+```
+output/<MODEL>/<SCENARIO>/nested/
+└── outer_s<N>/
+    ├── best_hyperparameters.json   # HPs selecionados pelo Optuna interno
+    ├── optuna_trials.csv
+    ├── param_importance.png
+    ├── optuna_study.db
+    └── (mesmos artefatos de métricas do modo train)
+```
 
-### Busca de Hiperparâmetros
-- `optuna_study.db` — Banco SQLite do Optuna
-- `best_hyperparameters.json` — Melhores hiperparâmetros encontrados
-- `test_data.npz` — Split treino/val e teste (por indivíduo)
-- `optuna_trials.csv` — Histórico de todos os trials
-- `param_importance.png/.html` — Importância dos hiperparâmetros
+### Após `aggregate`
+```
+output/<MODEL>/<SCENARIO>/
+├── all_metrics.csv          # Métricas de todos os folds concatenadas
+├── summary_metrics.csv      # Média e desvio padrão
+├── metrics_boxplot.png
+├── f1_histogram.png
+├── f1_vs_accuracy.png
+└── correlation_heatmap.png
+```
 
-### Treinamento Final — Redes Neurais (CNN1D, MLP, LSTM)
-- `model_X/model_X.pt` — Modelo salvo
-- `model_X/metrics_model_X.csv` — Métricas por modelo
-- `model_X/loss_curve_model_X.png` — Curva de loss
-- `model_X/confusion_matrix_model_X.png` — Matriz de confusão
-- `all_metrics.csv` / `summary_metrics.csv` — Métricas agregadas
-- `metrics_boxplot.png` — Boxplot das métricas
-
-### Treinamento Final — Modelos Clássicos (RF, SVM, XGBoost)
-- `model_X/model_X.pkl` — Modelo serializado (joblib)
-- `model_X/metrics_model_X.csv` — Métricas por modelo
-- `model_X/confusion_matrix_model_X.png` — Matriz de confusão
-- `model_X/roc_curve_model_X.png` — Curva ROC
-- `model_X/classification_report_model_X.txt` — Relatório de classificação
-- `all_metrics.csv` / `summary_metrics.csv` — Métricas agregadas
-
-### Análise SHAP
-- `shap_values_*.npy` — Valores SHAP
-- `shap_importance_*.csv/.png` — Importância por feature e por classe
-
-### Curva de Aprendizado
-- `learning_curve.csv` / `learning_curve.png`
-
-### Análise Global (`analise_global/`)
-- Boxplots, curvas ROC, matrizes de confusão, curvas de aprendizado e importância de features comparados entre todos os experimentos
+### Após `analyze`
+```
+analise_global/
+├── summary_final_models.csv
+└── boxplots/
+    ├── all/    f1/    acc/    mcc/    prec/    sens/    spec/
+    └── (boxplots comparativos entre todos os combos)
+```
 
 ## Script em Lote (`run.py`)
 
-O `run.py` executa busca e/ou treinamento para todos os modelos e cenários de uma vez.
+O `run.py` executa treino e/ou análise para todos os modelos e cenários de uma vez.
 
 ```bash
-# Treinar tudo com DEFAULT_PARAMS (sem busca)
+# Treinar tudo com DEFAULT_PARAMS (padrão se nenhuma flag for passada)
 python run.py
 
-# Busca de hiperparâmetros + treinamento, todos os combos
-python run.py --search --train
+# LOGO aninhado, todos os combos
+python run.py --nested
 
-# Apenas busca, um modelo, todos os cenários
-python run.py --search --model RF
+# Treinar um combo específico
+python run.py --train --model CNN1D --scenario chest_T
 
-# Busca + treino, um combo específico
-python run.py --search --train --model CNN1D --scenario chest_T
+# LOGO aninhado, modelo específico, 15 trials internos
+python run.py --nested --model CNN1D --n_trials 15
 
-# Configurações customizadas
-python run.py --search --train --model LSTM --n_trials 50 --num_models 20 --epochs 300
+# LOGO aninhado com holdout interno
+python run.py --nested --inner holdout
+
+# Treinar tudo e depois agregar + analisar
+python run.py --train --analyze
+
+# Apenas agregar + analisar (sem re-treinar)
+python run.py --analyze
+
+# Agregar + analisar apenas para um modelo
+python run.py --analyze --model CNN1D
 ```
 
 | Opção | Padrão | Descrição |
 |---|---|---|
-| `--search` | — | Executa busca Optuna |
-| `--train` | — | Executa treinamento final (padrão se nenhuma flag for passada) |
+| `--train` | — | LOGO com DEFAULT\_PARAMS (padrão se nenhuma flag) |
+| `--nested` | — | LOGO aninhado com Optuna interno por fold |
+| `--analyze` | — | Agrega métricas por fold e roda análise global |
 | `--model` | todos | Filtra um modelo específico |
 | `--scenario` | todos | Filtra um cenário específico |
-| `--n_trials` | 30 | Número de trials Optuna |
-| `--num_models` | 30 | Número de modelos treinados |
-| `--epochs` | 200 | Épocas de treino (ignorado para RF/SVM/XGBoost) |
+| `--n_trials` | 30 | Trials Optuna por fold (modo `nested`) |
+| `--epochs` | 200 | Épocas de treino (ignorado para modelos clássicos) |
+| `--inner` | `kfold` | CV interno do `nested`: `kfold`, `holdout` ou `none` |
 
-Logs são salvos em `logs/<model>_<scenario>_{search,train}.log`.
+Logs são salvos em `logs/<MODEL>_<SCENARIO>_{train,nested,aggregate}.log`.
 
 ## Exemplo de Fluxo Completo
 
 ```bash
+# A partir da raiz do projeto
+
+# 1. Treinar todos os modelos e cenários com DEFAULT_PARAMS
+python run.py --train
+
+# 2. Agregar métricas e gerar análise global
+python run.py --analyze
+
+# --- Ou tudo de uma vez ---
+python run.py --train --analyze
+
+# --- LOGO aninhado (padrão ouro) para um combo ---
 cd src
+python pipeline.py nested -scenario chest_T --model CNN1D --n_trials 15 --epochs 200
 
-# --- Rede Neural (CNN1D) ---
-
-# 1. Busca de hiperparâmetros
-python pipeline.py search -scenario chest_T --model CNN1D --n_trials 30
-
-# 2. Relatório pós-trials
-python pipeline.py post_trials -scenario chest_T --model CNN1D
-
-# 3. Treinamento final
-python pipeline.py train -scenario chest_T --model CNN1D --num_models 30
-
-# 4. SHAP
-python analysis_pipeline.py shap -scenario chest_T --model CNN1D
-
-# 5. Curva de aprendizado
-python analysis_pipeline.py learning_curve -scenario chest_T --model CNN1D
-
-# 6. Agregar métricas
+# --- Análise individual ---
 python analysis_pipeline.py aggregate -scenario chest_T --model CNN1D
-
-# --- Modelo Clássico (Random Forest) ---
-
-# Com busca de hiperparâmetros
-python pipeline.py search -scenario chest_T --model RF --n_trials 30
-python pipeline.py train -scenario chest_T --model RF --num_models 10
-
-# Sem busca prévia (usa DEFAULT_PARAMS)
-python pipeline.py train -scenario chest_T --model RF --num_models 10
-
-# --- Análise Global (todos os experimentos) ---
-
+python analysis_pipeline.py shap -scenario chest_T --model CNN1D
+python analysis_pipeline.py learning_curve -scenario chest_T --model CNN1D
 python analysis_pipeline.py analyze
 ```
+
+
