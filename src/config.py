@@ -109,10 +109,10 @@ class Config:
     }
     
     N_INDIVIDUALS = 15       # total number of subjects in the dataset
-    N_TEST_INDIVIDUALS = 3   # subjects held out as the final test set (last N by group ID)
-                             # 3/15 = 20 % at the subject level — enough diversity for a
-                             # reliable test estimate while leaving 12 for LOGO (12 folds,
-                             # each training on 11 subjects)
+    # N_TEST_INDIVIDUALS = 3   # subjects held out as the final test set (last N by group ID)
+    #                          # 3/15 = 20 % at the subject level — enough diversity for a
+    #                          # reliable test estimate while leaving 12 for LOGO (12 folds,
+    #                          # each training on 11 subjects)
     
     FINAL_TRAINING = {
         'num_models': 30,

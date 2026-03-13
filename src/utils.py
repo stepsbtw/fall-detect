@@ -819,7 +819,12 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
         model.to(device)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=best_params["learning_rate"])
-        criterion = torch.nn.CrossEntropyLoss()
+
+        class_counts = np.bincount(y_tr, minlength=num_labels)
+        class_counts = np.maximum(class_counts, 1)
+        class_weights = len(y_tr) / (num_labels * class_counts.astype(float))
+        weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+        criterion_weighted = torch.nn.CrossEntropyLoss(weight=weight_tensor)
 
         batch_size =  Config.TRAINING_CONFIG.get('batch_size', 32)
         train_loader = torch.utils.data.DataLoader(
@@ -840,7 +845,7 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
 
         # Treinamento curto (val_loader is the local holdout, NOT the test set)
         y_pred, y_true, val_losses, train_losses = train(
-            model, train_loader, val_loader, optimizer, criterion, device,
+            model, train_loader, val_loader, optimizer, criterion_weighted, device,
             epochs=epochs,
             early_stopping=False,
             patience=5,
@@ -863,17 +868,22 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
         mcc = matthews_corrcoef(y_true_final, y_preds)
         f1 = f1_score(y_true_final, y_preds, average="macro")
         acc = accuracy_score(y_true_final, y_preds)
-        train_loss_mean = np.mean(train_losses)
-        val_loss_mean = np.mean(val_losses)
+        weighted_train_loss_mean = float(np.mean(train_losses))
+        weighted_val_loss_mean = float(np.mean(val_losses))
 
-        print(f"MCC: {mcc:.4f} | F1: {f1:.4f} | Acc: {acc:.4f} | Train Loss: {train_loss_mean:.4f} | Val Loss: {val_loss_mean:.4f}")
+        print(
+            f"MCC: {mcc:.4f} | F1: {f1:.4f} | Acc: {acc:.4f} | "
+            f"W-Train Loss: {weighted_train_loss_mean:.4f} | W-Val Loss: {weighted_val_loss_mean:.4f}"
+        )
         results.append({
             "Fraction": frac,
             "MCC": mcc,
             "F1": f1,
             "Accuracy": acc,
-            "Train_Loss": train_loss_mean,
-            "Val_Loss": val_loss_mean
+            "Weighted_Train_Loss": weighted_train_loss_mean,
+            "Weighted_Val_Loss": weighted_val_loss_mean,
+            "Train_Loss": weighted_train_loss_mean,
+            "Val_Loss": weighted_val_loss_mean
         })
 
     # Salvar CSV
@@ -887,11 +897,11 @@ def plot_learning_curve(create_model_fn, X_full, y_full, X_test, y_test, input_s
     plt.plot(df["Fraction"]*100, df["MCC"], marker='o', label="MCC")
     plt.plot(df["Fraction"]*100, df["F1"], marker='o', label="F1-score")
     plt.plot(df["Fraction"]*100, df["Accuracy"], marker='o', label="Accuracy")
-    plt.plot(df["Fraction"]*100, df["Train_Loss"], marker='o', label="Train Loss")
-    plt.plot(df["Fraction"]*100, df["Val_Loss"], marker='o', label="Val Loss")
+    plt.plot(df["Fraction"]*100, df["Weighted_Train_Loss"], marker='o', label="Weighted Train Loss")
+    plt.plot(df["Fraction"]*100, df["Weighted_Val_Loss"], marker='o', label="Weighted Val Loss")
     plt.xlabel("Porcentagem de Dados de Treino (%)")
     plt.ylabel("Valor da Métrica")
-    plt.title("Curva de Aprendizado - MCC, F1, Accuracy, Loss")
+    plt.title("Curva de Aprendizado - Métricas e Loss Weighted")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
