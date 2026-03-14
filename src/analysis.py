@@ -21,19 +21,15 @@ import seaborn as sns
 from datetime import datetime
 
 from config import Config
-from utils import (
-    load_model_state, create_model, load_hyperparameters,
-    load_test_data, plot_learning_curve,
+from training import create_model
+from test import (
+    load_model_state,
+    load_hyperparameters,
+    load_test_data,
+    plot_learning_curve,
 )
 
-SCENARIO_CHOICES = [
-    "chest_T", # "chest_F",
-    "left_T",  # "left_F",
-    "right_T", # "right_F",
-    # "chest_left_right_T", # "chest_left_right_F",
-    "chest_left_T",  # "chest_left_F",
-    "chest_right_T", # "chest_right_F",
-]
+SCENARIO_CHOICES = list(Config.SCENARIOS.keys())
 
 def run_shap(args):
     """Compute and save SHAP feature importance for the best trained model."""
@@ -437,7 +433,7 @@ def build_parser():
     # --- learning_curve ---
     p_lc = subparsers.add_parser("learning_curve", help="Generate learning curve")
     add_scenario_nn(p_lc)
-    p_lc.add_argument("--epochs", type=int, default=10, help="Épocas por fração")
+    p_lc.add_argument("--epochs", type=int, default=Config.LEARNING_CURVE_CONFIG["epochs"], help="Épocas por fração")
 
     # --- aggregate ---
     p_agg = subparsers.add_parser("aggregate", help="Aggregate per-model metrics")

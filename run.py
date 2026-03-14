@@ -53,31 +53,20 @@ import sys
 import numpy as np
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Defaults
-# ---------------------------------------------------------------------------
-NEURAL_MODELS    = ["CNN1D", "MLP", "LSTM"]
-CLASSICAL_MODELS = ["RF", "SVM", "XGBoost", "CatBoost"]
-ALL_MODELS       = NEURAL_MODELS + CLASSICAL_MODELS
-
-SCENARIOS = [
-    "chest_T",
-    # "chest_F",
-    "left_T",
-    # "left_F",
-    "right_T",
-    # "right_F",
-    "chest_left_T",
-    # "chest_left_F",
-    "chest_right_T",
-    # "chest_right_F",
-    # "chest_left_right_T",
-    # "chest_left_right_F",
-]
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOG_DIR    = SCRIPT_DIR / "logs"
 SRC_DIR    = SCRIPT_DIR / "src"
+
+sys.path.insert(0, str(SRC_DIR))
+from config import Config
+
+# ---------------------------------------------------------------------------
+# Defaults — derived from Config so there is a single source of truth
+# ---------------------------------------------------------------------------
+CLASSICAL_MODELS = sorted(Config.CLASSICAL_MODELS)
+NEURAL_MODELS    = [m for m in Config.DEFAULT_PARAMS if m not in Config.CLASSICAL_MODELS]
+ALL_MODELS       = NEURAL_MODELS + CLASSICAL_MODELS
+SCENARIOS        = list(Config.SCENARIOS.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -139,9 +128,15 @@ def run_command(cmd: list[str], log_path: Path) -> None:
 def run_train(model: str, scenario: str, epochs: int) -> None:
     log = LOG_DIR / f"{model}_{scenario}_train.log"
     print(f">>  train  model={model}  scenario={scenario}")
-    cmd = [sys.executable, "-u", "pipeline.py", "train",
-           "-scenario", scenario,
-           "--model", model]
+    cmd = [
+        sys.executable,
+        "-u",
+        "training.py",
+        "-scenario",
+        scenario,
+        "--model",
+        model,
+    ]
     if not is_classical(model):
         cmd += ["--epochs", str(epochs)]
     run_command(cmd, log)
@@ -151,11 +146,19 @@ def run_train(model: str, scenario: str, epochs: int) -> None:
 def run_nested(model: str, scenario: str, n_trials: int, epochs: int, inner: str) -> None:
     log = LOG_DIR / f"{model}_{scenario}_nested.log"
     print(f">>  nested  model={model}  scenario={scenario}  n_trials={n_trials}  inner={inner}")
-    cmd = [sys.executable, "-u", "pipeline.py", "nested",
-           "-scenario", scenario,
-           "--model", model,
-           "--n_trials", str(n_trials),
-           "--inner", inner]
+    cmd = [
+        sys.executable,
+        "-u",
+        "validation.py",
+        "-scenario",
+        scenario,
+        "--model",
+        model,
+        "--n_trials",
+        str(n_trials),
+        "--inner",
+        inner,
+    ]
     if not is_classical(model):
         cmd += ["--epochs", str(epochs)]
     run_command(cmd, log)
@@ -165,7 +168,7 @@ def run_nested(model: str, scenario: str, n_trials: int, epochs: int, inner: str
 def run_aggregate(model: str, scenario: str) -> None:
     log = LOG_DIR / f"{model}_{scenario}_aggregate.log"
     print(f">>  aggregate  model={model}  scenario={scenario}")
-    cmd = [sys.executable, "-u", "analysis_pipeline.py", "aggregate",
+    cmd = [sys.executable, "-u", "analysis.py", "aggregate",
            "-scenario", scenario,
            "--model", model]
     run_command(cmd, log)
@@ -175,7 +178,7 @@ def run_aggregate(model: str, scenario: str) -> None:
 def run_analyze(output_dir: str = "analise_global") -> None:
     log = LOG_DIR / "analyze_global.log"
     print(f">>  analyze  output_dir={output_dir}")
-    cmd = [sys.executable, "-u", "analysis_pipeline.py", "analyze",
+    cmd = [sys.executable, "-u", "analysis.py", "analyze",
            "--base_dir", "../output",
            "--output_dir", f"../{output_dir}"]
     run_command(cmd, log)
@@ -206,8 +209,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analyze",    action="store_true", help="Aggregate per-fold metrics then run global analysis for all completed combos")
     parser.add_argument("--model",      metavar="MODEL",    help="One of: " + " ".join(ALL_MODELS))
     parser.add_argument("--scenario",   metavar="SCENARIO", help="e.g. chest_T, left_T ...")
-    parser.add_argument("--n_trials",   type=int, default=30,  metavar="N")
-    parser.add_argument("--epochs",     type=int, default=200, metavar="N")
+    parser.add_argument("--n_trials",   type=int, default=Config.OPTUNA_CONFIG["n_trials"],    metavar="N")
+    parser.add_argument("--epochs",     type=int, default=Config.TRAINING_CONFIG["epochs"],    metavar="N")
     parser.add_argument("--inner",      choices=["kfold", "holdout", "none"], default="kfold",
                         help="Inner CV for --nested: kfold=GroupKFold(k=3), holdout=GroupShuffleSplit(n=1), none=in-sample (default=kfold)")
     return parser.parse_args()
