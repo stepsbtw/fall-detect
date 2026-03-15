@@ -209,6 +209,13 @@ class Config:
         return os.path.join(base, scenario)
 
     @classmethod
+    def get_models_dir(cls, model_type, scenario):
+        base = os.path.normpath(os.path.join(cls.ROOT_DIR, "..", "models"))
+        if model_type:
+            return os.path.join(base, model_type, scenario)
+        return os.path.join(base, scenario)
+
+    @classmethod
     def get_input_shape_dict(cls, scenario, model_type=None):
         seq_len, num_features = cls.SCENARIOS[scenario][2]
         flat = seq_len * num_features

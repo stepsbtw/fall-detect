@@ -1,7 +1,6 @@
 """Testing, reporting and result persistence helpers."""
 
 import os
-import csv
 import json
 from collections import OrderedDict
 
@@ -14,7 +13,6 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.metrics import (
     confusion_matrix,
     classification_report,
@@ -24,16 +22,29 @@ from sklearn.metrics import (
     f1_score,
     accuracy_score,
 )
+from sklearn.model_selection import GroupShuffleSplit
 import pandas as pd
 
 from config import Config
 
 
-def save_results(model, val_loader, y_val_onehot, i, decision_threshold, output_dir, device):
+def save_results(
+    model,
+    val_loader,
+    y_val_onehot,
+    i,
+    decision_threshold,
+    output_dir,
+    device,
+    model_output_dir=None,
+):
     """Persist model checkpoint and full evaluation artifacts."""
     os.makedirs(output_dir, exist_ok=True)
+    if model_output_dir is None:
+        model_output_dir = output_dir
+    os.makedirs(model_output_dir, exist_ok=True)
 
-    model_path = os.path.join(output_dir, f"model_{i}.pt")
+    model_path = os.path.join(model_output_dir, f"model_{i}.pt")
     torch.save(model.state_dict(), model_path)
 
     model.eval()
@@ -53,7 +64,7 @@ def save_results(model, val_loader, y_val_onehot, i, decision_threshold, output_
 
     cm = confusion_matrix(y_true, y_pred)
     tn, fp, fn, tp = cm.ravel()
-    plot_confusion_matrix(cm, output_dir, i)
+    save_confusion_matrix_txt(cm, output_dir, i)
 
     save_classification_report(y_pred, y_true, output_dir, i)
     plot_roc_curve(y_probs[:, 1], y_true, output_dir, i)
@@ -62,11 +73,22 @@ def save_results(model, val_loader, y_val_onehot, i, decision_threshold, output_
     record_metrics(metrics, tp, tn, fp, fn, i, output_dir)
 
 
-def save_results_classical(clf, X_test_flat, y_test, decision_threshold, i, output_dir):
+def save_results_classical(
+    clf,
+    X_test_flat,
+    y_test,
+    decision_threshold,
+    i,
+    output_dir,
+    model_output_dir=None,
+):
     """Persist and evaluate classical sklearn/XGBoost/CatBoost models."""
     os.makedirs(output_dir, exist_ok=True)
+    if model_output_dir is None:
+        model_output_dir = output_dir
+    os.makedirs(model_output_dir, exist_ok=True)
 
-    joblib.dump(clf, os.path.join(output_dir, f"model_{i}.pkl"))
+    joblib.dump(clf, os.path.join(model_output_dir, f"model_{i}.pkl"))
 
     y_probs = clf.predict_proba(X_test_flat)
     y_pred = (y_probs[:, 1] >= decision_threshold).astype(int)
@@ -74,7 +96,7 @@ def save_results_classical(clf, X_test_flat, y_test, decision_threshold, i, outp
 
     cm = confusion_matrix(y_true, y_pred)
     tn, fp, fn, tp = cm.ravel()
-    plot_confusion_matrix(cm, output_dir, i)
+    save_confusion_matrix_txt(cm, output_dir, i)
 
     save_classification_report(y_pred, y_true, output_dir, i)
     plot_roc_curve(y_probs[:, 1], y_true, output_dir, i)
@@ -83,24 +105,17 @@ def save_results_classical(clf, X_test_flat, y_test, decision_threshold, i, outp
     record_metrics(metrics, tp, tn, fp, fn, i, output_dir)
 
 
-def plot_confusion_matrix(cm, output_dir, i):
-    """Save confusion matrix plot."""
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(
-        cm,
-        annot=True,
-        fmt="d",
-        cmap="Blues",
-        xticklabels=["Nao Queda", "Queda"],
-        yticklabels=["Nao Queda", "Queda"],
-    )
-    plt.title(f"Matriz de Confusao - Modelo {i}")
-    plt.ylabel("Valor Real")
-    plt.xlabel("Valor Predito")
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"confusion_matrix_model_{i}.png"), dpi=300, bbox_inches="tight")
-    plt.close()
+def save_confusion_matrix_txt(cm, output_dir, i):
+    """Save confusion matrix as plain text."""
+    labels = ["Nao Queda", "Queda"]
+    path = os.path.join(output_dir, f"confusion_matrix_model_{i}.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"Matriz de Confusao - Modelo {i}\n")
+        f.write("=" * 32 + "\n\n")
+        f.write("Formato: linhas=Real, colunas=Predito\n\n")
+        f.write(f"{'':>12}{labels[0]:>12}{labels[1]:>12}\n")
+        f.write(f"{labels[0]:>12}{int(cm[0, 0]):>12}{int(cm[0, 1]):>12}\n")
+        f.write(f"{labels[1]:>12}{int(cm[1, 0]):>12}{int(cm[1, 1]):>12}\n")
 
 
 def plot_roc_curve(y_score, y_true, output_dir, i):
@@ -159,41 +174,8 @@ def calculate_metrics(tp, tn, fp, fn, y_true, y_pred):
 
 
 def record_metrics(metrics, tp, tn, fp, fn, i, output_dir):
-    """Persist metrics as CSV."""
-    path = os.path.join(output_dir, f"metrics_model_{i}.csv")
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "Model",
-                "MCC",
-                "Sensitivity",
-                "Specificity",
-                "Precision",
-                "Accuracy",
-                "F1",
-                "tp",
-                "tn",
-                "fp",
-                "fn",
-            ],
-        )
-        writer.writeheader()
-        writer.writerow(
-            {
-                "Model": i,
-                "MCC": metrics["MCC"],
-                "Sensitivity": metrics["Sensitivity"],
-                "Specificity": metrics["Specificity"],
-                "Precision": metrics["Precision"],
-                "Accuracy": metrics["Accuracy"],
-                "F1": metrics["F1"],
-                "tp": tp,
-                "tn": tn,
-                "fp": fp,
-                "fn": fn,
-            }
-        )
+    """Per-model metrics CSV output is intentionally disabled."""
+    _ = (metrics, tp, tn, fp, fn, i, output_dir)
 
 
 def save_classification_report(y_pred, y_true, output_dir, i):
@@ -241,6 +223,7 @@ def plot_learning_curve(
     create_model_fn,
     X_full,
     y_full,
+    groups_full,
     X_test,
     y_test,
     input_shape,
@@ -252,7 +235,7 @@ def plot_learning_curve(
     epochs=None,
     seed=None,
 ):
-    """Generate learning curves by varying the train-set fraction."""
+    """Generate group-aware learning curves by varying the number of train groups."""
     if fractions is None:
         fractions = Config.LEARNING_CURVE_CONFIG["fractions"]
     if epochs is None:
@@ -267,17 +250,29 @@ def plot_learning_curve(
     print("INICIANDO GERACAO DA LEARNING CURVE")
     print(f"{'=' * 50}")
 
+    unique_groups = np.unique(groups_full)
+    if len(unique_groups) < 2:
+        raise ValueError("Sao necessarios pelo menos 2 grupos para learning curve baseada em grupos.")
+
     for frac in fractions:
-        size = int(len(X_full) * frac)
-        idx = rng.choice(len(X_full), size, replace=False)
-        X_subset = X_full[idx]
-        y_subset = y_full[idx]
+        n_groups = int(round(len(unique_groups) * frac))
+        n_groups = max(2, min(n_groups, len(unique_groups)))
+        selected_groups = rng.choice(unique_groups, size=n_groups, replace=False)
+        subset_mask = np.isin(groups_full, selected_groups)
 
-        split = int(len(X_subset) * 0.8)
-        X_tr, X_vl = X_subset[:split], X_subset[split:]
-        y_tr, y_vl = y_subset[:split], y_subset[split:]
+        X_subset = X_full[subset_mask]
+        y_subset = y_full[subset_mask]
+        groups_subset = groups_full[subset_mask]
 
-        print(f"\nTreinando com {len(X_tr)} amostras ({int(frac * 100)}% do dataset, val={len(X_vl)})")
+        splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=seed + int(frac * 1000))
+        tr_idx, vl_idx = next(splitter.split(X_subset, y_subset, groups_subset))
+        X_tr, X_vl = X_subset[tr_idx], X_subset[vl_idx]
+        y_tr, y_vl = y_subset[tr_idx], y_subset[vl_idx]
+
+        print(
+            f"\nTreinando com {len(np.unique(groups_subset))} grupos "
+            f"({int(frac * 100)}% dos grupos, train={len(X_tr)}, val={len(X_vl)})"
+        )
 
         model = create_model_fn(best_params, input_shape, num_labels)
         model.to(device)
@@ -352,6 +347,7 @@ def plot_learning_curve(
         results.append(
             {
                 "Fraction": frac,
+                "Num_Groups": int(len(np.unique(groups_subset))),
                 "MCC": mcc,
                 "F1": f1,
                 "Accuracy": acc,
@@ -373,14 +369,15 @@ def plot_learning_curve(
     print(f"Metricas da curva de aprendizado salvas em: {csv_path}")
 
     plt.figure(figsize=(10, 7))
-    plt.plot(df["Fraction"] * 100, df["MCC"], marker="o", label="MCC")
-    plt.plot(df["Fraction"] * 100, df["F1"], marker="o", label="F1-score")
-    plt.plot(df["Fraction"] * 100, df["Accuracy"], marker="o", label="Accuracy")
-    plt.plot(df["Fraction"] * 100, df["Weighted_Train_Loss"], marker="o", label="Weighted Train Loss")
-    plt.plot(df["Fraction"] * 100, df["Weighted_Val_Loss"], marker="o", label="Weighted Val Loss")
-    plt.xlabel("Porcentagem de Dados de Treino (%)")
+    xvals = df["Num_Groups"] if "Num_Groups" in df.columns else (df["Fraction"] * 100)
+    plt.plot(xvals, df["MCC"], marker="o", label="MCC")
+    plt.plot(xvals, df["F1"], marker="o", label="F1-score")
+    plt.plot(xvals, df["Accuracy"], marker="o", label="Accuracy")
+    plt.plot(xvals, df["Weighted_Train_Loss"], marker="o", label="Weighted Train Loss")
+    plt.plot(xvals, df["Weighted_Val_Loss"], marker="o", label="Weighted Val Loss")
+    plt.xlabel("Numero de Grupos de Treino")
     plt.ylabel("Valor da Metrica")
-    plt.title("Curva de Aprendizado")
+    plt.title("Curva de Aprendizado (por grupos)")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()

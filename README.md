@@ -172,7 +172,7 @@ Lê os CSVs de `fold_s*/metrics_model_s*.csv`, gera `all_metrics.csv`, `summary_
 ### Análise Global (todos os experimentos)
 
 ```bash
-python analysis_pipeline.py analyze [--base_dir output] [--output_dir analise_global]
+python analysis_pipeline.py analyze [--base_dir output] [--output_dir analysis]
 ```
 
 ## Cenários Disponíveis
@@ -264,7 +264,7 @@ output/<MODEL>/<SCENARIO>/
 
 ### Após `analyze`
 ```
-analise_global/
+analysis/
 ├── summary_final_models.csv
 └── boxplots/
     ├── all/    f1/    acc/    mcc/    prec/    sens/    spec/

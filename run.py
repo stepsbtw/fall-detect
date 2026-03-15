@@ -175,7 +175,7 @@ def run_aggregate(model: str, scenario: str) -> None:
     print(f"    done  (log: {log})")
 
 
-def run_analyze(output_dir: str = "analise_global") -> None:
+def run_analyze(output_dir: str = "output/analysis") -> None:
     log = LOG_DIR / "analyze_global.log"
     print(f">>  analyze  output_dir={output_dir}")
     cmd = [sys.executable, "-u", "analysis.py", "analyze",
@@ -185,14 +185,10 @@ def run_analyze(output_dir: str = "analise_global") -> None:
     print(f"    done  (log: {log})")
 
 
-def is_global_analysis_done(output_dir: str = "analise_global") -> bool:
+def is_global_analysis_done(output_dir: str = "output/analysis") -> bool:
     """Return True when global analysis artifacts already exist."""
     analysis_root = SCRIPT_DIR / output_dir
-    marker_files = [
-        analysis_root / "summary_final_models.csv",
-        analysis_root / "boxplots" / "all",
-    ]
-    return any(path.exists() for path in marker_files)
+    return (analysis_root / "summary_final_models.csv").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +308,8 @@ def _run_full_analysis(models: list, scenarios: list) -> None:
     print(f"  Aggregate complete — {aggregated} combos processed, {skipped} skipped.")
     print()
 
-    if is_global_analysis_done("analise_global"):
-        print("   [skip] global analyze — analysis output already exists (analise_global/).")
+    if is_global_analysis_done("output/analysis"):
+        print("   [skip] global analyze — analysis output already exists (output/analysis/).")
         return
 
     try:

@@ -257,6 +257,7 @@ def run_final_training(args):
         for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
             left_out = groups[test_idx[0]]
             fold_dir = os.path.join(base_out, f"fold_s{left_out}")
+            model_fold_dir = os.path.join(Config.get_models_dir(model_type_arg, scenario), f"fold_s{left_out}")
             fold_label = f"s{left_out}"
             done_marker = os.path.join(fold_dir, f"metrics_model_{fold_label}.csv")
             if os.path.exists(done_marker):
@@ -277,6 +278,7 @@ def run_final_training(args):
                 decision_threshold=threshold,
                 i=fold_label,
                 output_dir=fold_dir,
+                model_output_dir=model_fold_dir,
             )
             print(f"  Fold s{left_out} concluido")
         print(f"\nLOGO concluido! Resultados em: {base_out}")
@@ -290,6 +292,7 @@ def run_final_training(args):
     for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
         left_out = groups[test_idx[0]]
         fold_dir = os.path.join(base_out, f"fold_s{left_out}")
+        model_fold_dir = os.path.join(Config.get_models_dir(model_type_arg, scenario), f"fold_s{left_out}")
         fold_label = f"s{left_out}"
         done_marker = os.path.join(fold_dir, f"metrics_model_{fold_label}.csv")
         if os.path.exists(done_marker):
@@ -367,18 +370,6 @@ def run_final_training(args):
         )
 
         plot_loss_curve(train_losses, val_losses, fold_dir, fold_label)
-        np.save(os.path.join(fold_dir, f"train_losses_{fold_label}.npy"), np.array(train_losses))
-        np.save(os.path.join(fold_dir, f"val_losses_{fold_label}.npy"), np.array(val_losses))
-
-        import pandas as pd
-
-        pd.DataFrame(
-            {
-                "epoch": range(1, len(train_losses) + 1),
-                "train_loss": train_losses,
-                "val_loss": val_losses,
-            }
-        ).to_csv(os.path.join(fold_dir, f"losses_{fold_label}.csv"), index=False)
 
         save_results(
             model=model,
@@ -388,6 +379,7 @@ def run_final_training(args):
             decision_threshold=threshold,
             output_dir=fold_dir,
             device=Config.DEVICE,
+            model_output_dir=model_fold_dir,
         )
         print(f"  Fold s{left_out} concluido - salvo em {fold_dir}")
 

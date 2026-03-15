@@ -17,8 +17,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
-import seaborn as sns
 from datetime import datetime
+from sklearn.model_selection import GroupShuffleSplit
 
 from config import Config
 from training import create_model
@@ -30,6 +30,112 @@ from test import (
 )
 
 SCENARIO_CHOICES = list(Config.SCENARIOS.keys())
+
+
+def _build_human_readable_df(df, decimals=3):
+    """Build a compact dataframe for TXT output (e.g., mean +- std columns)."""
+    if df.empty:
+        return df
+
+    formatted = df.copy()
+
+    mean_cols = [c for c in formatted.columns if c.endswith("_mean")]
+    metric_names = []
+    for mean_col in mean_cols:
+        metric = mean_col[:-5]
+        std_col = f"{metric}_std"
+        if std_col in formatted.columns:
+            metric_names.append(metric)
+
+    if metric_names:
+        for metric in metric_names:
+            mean_col = f"{metric}_mean"
+            std_col = f"{metric}_std"
+            formatted[metric] = formatted.apply(
+                lambda row: f"{row[mean_col]:.{decimals}f} +- {row[std_col]:.{decimals}f}",
+                axis=1,
+            )
+
+        keep_cols = [
+            c for c in formatted.columns
+            if not (c.endswith("_mean") or c.endswith("_std") or c in metric_names)
+        ]
+        metric_cols = [m for m in metric_names if m in formatted.columns]
+        formatted = formatted[keep_cols + metric_cols]
+
+    numeric_cols = formatted.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols) > 0:
+        formatted[numeric_cols] = formatted[numeric_cols].round(decimals)
+
+    # Shorter display names for TXT/TEX to keep table width manageable.
+    rename_map = {
+        "model_type": "Model",
+        "scenario": "Data",
+        "subject_id": "ID",
+        "Accuracy": "Acc",
+        "Precision": "Prec",
+        "Sensitivity": "Recall",
+    }
+    formatted = formatted.rename(columns=rename_map)
+
+    return formatted
+
+
+def _save_csv_and_txt(df, csv_path, title, output_root=None):
+    """Save dataframe as CSV, TXT, and LaTeX table.
+
+    If output_root is provided, exports are split into:
+    - <output_root>/csv/<relative_path>.csv
+    - <output_root>/txt/<relative_path>.txt
+    - <output_root>/tex/<relative_path>.tex
+    """
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    df.to_csv(csv_path, index=False)
+
+    if output_root:
+        csv_root = os.path.join(output_root, "csv")
+        rel_csv_path = os.path.relpath(csv_path, csv_root)
+        rel_base_no_ext = os.path.splitext(rel_csv_path)[0]
+        txt_path = os.path.join(output_root, "txt", rel_base_no_ext + ".txt")
+        tex_path = os.path.join(output_root, "tex", rel_base_no_ext + ".tex")
+    else:
+        txt_path = os.path.splitext(csv_path)[0] + ".txt"
+        tex_path = os.path.splitext(csv_path)[0] + ".tex"
+
+    os.makedirs(os.path.dirname(txt_path), exist_ok=True)
+    os.makedirs(os.path.dirname(tex_path), exist_ok=True)
+
+    lines = [title, "=" * len(title), ""]
+    readable_df = _build_human_readable_df(df)
+
+    if readable_df.empty:
+        lines.append("No rows available.")
+    else:
+        lines.append(f"Rows: {len(readable_df)}")
+        lines.append(f"Columns: {len(readable_df.columns)}")
+        lines.append("")
+        lines.append(readable_df.to_string(index=False, max_colwidth=28))
+
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    use_longtable = len(readable_df) > 30
+    latex_df = readable_df.copy()
+    numeric_cols = latex_df.select_dtypes(include=[np.number]).columns
+    for col in numeric_cols:
+        latex_df[col] = latex_df[col].map(lambda x: f"{x:.3f}")
+
+    latex_table = latex_df.to_latex(
+        index=False,
+        escape=True,
+        caption=title,
+        label=None,
+        longtable=use_longtable,
+    )
+    # Improve readability in rendered LaTeX for mean/std summary cells.
+    latex_table = latex_table.replace(" +- ", " $\\pm$ ")
+    with open(tex_path, "w", encoding="utf-8") as f:
+        f.write(latex_table)
 
 def run_shap(args):
     """Compute and save SHAP feature importance for the best trained model."""
@@ -49,8 +155,24 @@ def run_shap(args):
     if not os.path.exists(all_metrics_path):
         raise FileNotFoundError(f"Arquivo de métricas não encontrado: {all_metrics_path}")
     metrics_df = pd.read_csv(all_metrics_path)
-    best_idx = metrics_df["F1"].idxmax() + 1
-    best_model_path = os.path.join(base_out, f"model_{best_idx}", f"model_{best_idx}.pt")
+    best_row = metrics_df.loc[metrics_df["F1"].idxmax()]
+    best_label = str(best_row.get("Model", "")).strip()
+    if best_label.isdigit():
+        best_label = f"s{best_label}"
+    if not best_label:
+        best_label = f"s{int(metrics_df['F1'].idxmax()) + 1}"
+
+    best_model_path = os.path.join(
+        Config.get_models_dir(model_type, scenario),
+        f"fold_{best_label}",
+        f"model_{best_label}.pt",
+    )
+    if not os.path.exists(best_model_path):
+        legacy_path = os.path.join(base_out, f"model_{best_label}", f"model_{best_label}.pt")
+        if os.path.exists(legacy_path):
+            best_model_path = legacy_path
+        else:
+            raise FileNotFoundError(f"Arquivo de modelo não encontrado: {best_model_path}")
     model = load_model_state(model, best_model_path, device=str(device))
     model.to(device)
 
@@ -81,7 +203,7 @@ def run_shap(args):
         model.eval()
         torch.backends.cudnn.enabled = True
 
-    shap_out = os.path.join("analise_global", "shap")
+    shap_out = os.path.join("analysis", "shap")
     os.makedirs(shap_out, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     prefix = f"{model_type}_{scenario}_{timestamp}"
@@ -133,18 +255,74 @@ def run_learning_curve(args):
 
     base_out = Config.get_output_dir(model_type_arg, scenario)
 
-    results = load_hyperparameters(base_out)
-    best_params = results["best_params"]
-    model_type = best_params["model_type"] if not model_type_arg else model_type_arg
+    best_params = None
+    model_type = model_type_arg
 
-    data = np.load(os.path.join(base_out, "test_data.npz"))
-    X_trainval, y_trainval = data['X_trainval'], data['y_trainval']
-    X_test, y_test = data['X_test'], data['y_test']
+    hp_path = os.path.join(base_out, "best_hyperparameters.json")
+    if os.path.exists(hp_path):
+        results = load_hyperparameters(base_out)
+        if isinstance(results, dict) and "best_params" in results:
+            best_params = results["best_params"]
+        else:
+            best_params = results
+
+        if model_type is None:
+            model_type = best_params.get("model_type")
+
+    if model_type is None:
+        raise ValueError("--model e obrigatorio quando best_hyperparameters.json nao existe.")
+
+    if model_type in Config.CLASSICAL_MODELS:
+        raise ValueError("learning_curve suporta apenas modelos neurais: CNN1D, MLP, LSTM.")
+
+    if best_params is None:
+        best_params = dict(Config.DEFAULT_PARAMS[model_type])
+
+    if "model_type" not in best_params:
+        best_params["model_type"] = model_type
+
+    test_data_path = os.path.join(base_out, "test_data.npz")
+    X = np.load(Config.get_data_file(scenario))
+    y = np.load(Config.get_labels_file(scenario)).astype(np.int64)
+    groups = np.load(Config.get_groups_file(scenario))
+
+    needs_group_rebuild = True
+    if os.path.exists(test_data_path):
+        data = np.load(test_data_path)
+        has_groups = "groups_trainval" in data and "groups_test" in data
+        if has_groups:
+            X_trainval, y_trainval = data["X_trainval"], data["y_trainval"]
+            X_test, y_test = data["X_test"], data["y_test"]
+            groups_trainval = data["groups_trainval"]
+            needs_group_rebuild = False
+
+    if needs_group_rebuild:
+        splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=Config.SEED)
+        train_idx, test_idx = next(splitter.split(X, y, groups=groups))
+
+        X_trainval, y_trainval = X[train_idx], y[train_idx]
+        X_test, y_test = X[test_idx], y[test_idx]
+        groups_trainval = groups[train_idx]
+        groups_test = groups[test_idx]
+
+        os.makedirs(base_out, exist_ok=True)
+        np.savez(
+            test_data_path,
+            X_trainval=X_trainval,
+            y_trainval=y_trainval,
+            groups_trainval=groups_trainval,
+            X_test=X_test,
+            y_test=y_test,
+            groups_test=groups_test,
+        )
+        print(f"test_data.npz atualizado com split por grupos em: {test_data_path}")
 
     input_shape = Config.get_input_shape_dict(scenario, model_type)[model_type]
     plot_learning_curve(
         create_model_fn=lambda bp, shape, nl: create_model(model_type, bp, shape, nl),
-        X_full=X_trainval, y_full=y_trainval,
+        X_full=X_trainval,
+        y_full=y_trainval,
+        groups_full=groups_trainval,
         X_test=X_test, y_test=y_test,
         input_shape=input_shape,
         num_labels=Config.NUM_LABELS,
@@ -153,67 +331,6 @@ def run_learning_curve(args):
         output_dir=base_out,
         epochs=args.epochs,
     )
-
-def _create_metric_visualizations(df, base_out):
-    """Create and save metric visualisation plots."""
-    plt.style.use('default')
-    sns.set_palette("husl")
-
-    metrics_cols = [c for c in ['F1', 'Accuracy', 'Precision', 'Sensitivity', 'Specificity', 'MCC']
-                    if c in df.columns]
-
-    if metrics_cols:
-        fig, ax = plt.subplots(figsize=(12, 8))
-        df[metrics_cols].boxplot(ax=ax)
-        ax.set_title('Distribuição das Métricas dos Modelos Finais', fontsize=14, fontweight='bold')
-        ax.set_ylabel('Valor da Métrica', fontsize=12)
-        ax.set_xlabel('Métrica', fontsize=12)
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.savefig(os.path.join(base_out, "metrics_boxplot.png"), dpi=300, bbox_inches='tight')
-        plt.close()
-
-    if 'F1' in df.columns:
-        plt.figure(figsize=(10, 6))
-        plt.hist(df['F1'], bins=15, alpha=0.7, edgecolor='black')
-        plt.axvline(df['F1'].mean(), color='red', linestyle='--',
-                    label=f'Média: {df["F1"].mean():.4f}')
-        plt.axvline(df['F1'].median(), color='green', linestyle='--',
-                    label=f'Mediana: {df["F1"].median():.4f}')
-        plt.xlabel('F1-Score', fontsize=12)
-        plt.ylabel('Frequência', fontsize=12)
-        plt.title('Distribuição do F1-Score dos Modelos Finais', fontsize=14, fontweight='bold')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(os.path.join(base_out, "f1_histogram.png"), dpi=300, bbox_inches='tight')
-        plt.close()
-
-    if 'F1' in df.columns and 'Accuracy' in df.columns:
-        plt.figure(figsize=(10, 6))
-        plt.scatter(df['Accuracy'], df['F1'], alpha=0.7, s=50)
-        plt.xlabel('Accuracy', fontsize=12)
-        plt.ylabel('F1-Score', fontsize=12)
-        plt.title('F1-Score vs Accuracy dos Modelos Finais', fontsize=14, fontweight='bold')
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(os.path.join(base_out, "f1_vs_accuracy.png"), dpi=300, bbox_inches='tight')
-        plt.close()
-
-    if len(metrics_cols) > 1:
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(df[metrics_cols].corr(), annot=True, cmap='coolwarm', center=0,
-                    square=True, linewidths=0.5)
-        plt.title('Matriz de Correlação das Métricas', fontsize=14, fontweight='bold')
-        plt.tight_layout()
-        plt.savefig(os.path.join(base_out, "correlation_heatmap.png"), dpi=300, bbox_inches='tight')
-        plt.close()
-
-    print("\nEstatísticas das métricas:")
-    for col in metrics_cols:
-        print(f"{col}: média={df[col].mean():.4f}  std={df[col].std():.4f}  "
-              f"min={df[col].min():.4f}  max={df[col].max():.4f}  mediana={df[col].median():.4f}")
-
 
 def _aggregate_model_metrics(base_out):
     """Aggregate per-model CSVs into all_metrics.csv and summary_metrics.csv."""
@@ -227,6 +344,7 @@ def _aggregate_model_metrics(base_out):
         if os.path.exists(metrics_file):
             try:
                 df = pd.read_csv(metrics_file)
+                df.insert(0, 'subject_id', subject_id)
                 all_metrics.append(df)
                 print(f"Fold {subject_id}: F1={df['F1'].iloc[0]:.4f}, Acc={df['Accuracy'].iloc[0]:.4f}")
             except Exception as e:
@@ -240,7 +358,7 @@ def _aggregate_model_metrics(base_out):
 
     combined_df = pd.concat(all_metrics, ignore_index=True)
 
-    expected_columns = ['Model', 'MCC', 'Sensitivity', 'Specificity', 'Precision', 'Accuracy', 'F1',
+    expected_columns = ['subject_id', 'Model', 'MCC', 'Sensitivity', 'Specificity', 'Precision', 'Accuracy', 'F1',
                         'tp', 'tn', 'fp', 'fn']
     combined_df = combined_df[[c for c in expected_columns if c in combined_df.columns]]
 
@@ -249,13 +367,12 @@ def _aggregate_model_metrics(base_out):
     print(f"\nMétricas consolidadas salvas em: {all_metrics_path}")
     print(f"Total de modelos processados: {len(combined_df)}")
 
-    numeric_cols = [c for c in combined_df.columns if c != 'Model']
+    numeric_cols = [c for c in combined_df.columns if c not in ['subject_id', 'Model']]
     summary_df = combined_df[numeric_cols].describe().loc[['mean', 'std']].copy()
     summary_df.insert(0, 'Model', ['mean', 'std'])
     summary_df.to_csv(os.path.join(base_out, "summary_metrics.csv"))
     print(f"Estatísticas resumidas salvas em: {os.path.join(base_out, 'summary_metrics.csv')}")
 
-    _create_metric_visualizations(combined_df, base_out)
     return True
 
 
@@ -275,7 +392,7 @@ def run_aggregate(args):
 def _scan_output_dir(base_dir="output"):
     """Walk output directory and collect experiment summaries."""
     results = []
-    for root, dirs, files in os.walk(base_dir):
+    for root, _, files in os.walk(base_dir):
         if "summary_metrics.csv" not in files:
             continue
         parts = root.replace("\\", "/").split("/")
@@ -285,134 +402,214 @@ def _scan_output_dir(base_dir="output"):
         scenario = parts[-1]
         results.append({
             "model_type": nn,
-            "position": "",
             "scenario": scenario,
-            "label_type": "",
-            "summary_metrics": os.path.join(root, "summary_metrics.csv"),
             "all_metrics": os.path.join(root, "all_metrics.csv") if "all_metrics.csv" in files else None,
-            "learning_curve": os.path.join(root, "learning_curve_metrics.csv") if "learning_curve_metrics.csv" in files else None,
-            "permutation_importance": os.path.join(root, "permutation_importance.csv") if "permutation_importance.csv" in files else None,
-            "optuna_trials": os.path.join(root, "optuna_trials.csv") if "optuna_trials.csv" in files else None,
-            "optuna_db": os.path.join(root, "optuna_study.db") if "optuna_study.db" in files else None,
         })
     return pd.DataFrame(results)
 
 
 def _analyze_final_models(df, output_dir):
     os.makedirs(output_dir, exist_ok=True)
-    boxplot_root = os.path.join(output_dir, "boxplots")
-    subfolder_map = {
-        "Accuracy": "acc", "F1": "f1", "MCC": "mcc",
-        "Precision": "prec", "Sensitivity": "sens", "Specificity": "spec", "all": "all",
-    }
-    for sub in subfolder_map.values():
-        os.makedirs(os.path.join(boxplot_root, sub), exist_ok=True)
+    csv_root = os.path.join(output_dir, "csv")
+    os.makedirs(csv_root, exist_ok=True)
 
     summary_rows = []
+    subject_rows = []
     for _, row in df.iterrows():
         if not row["all_metrics"]:
             continue
         metrics_df = pd.read_csv(row["all_metrics"])
-        metricas_plot = [c for c in ["F1", "Accuracy", "Precision", "Sensitivity", "Specificity", "MCC"]
+        metricas_plot = [c for c in ["F1", "Accuracy", "Precision", "Sensitivity"]
                          if c in metrics_df.columns]
         if not metricas_plot:
             print(f"Nenhuma métrica reconhecida em {row['all_metrics']}, pulando.")
             continue
 
-        tag = "_".join(x for x in [row["model_type"], row["position"], row["scenario"], row["label_type"]] if x)
-
-        # All-metrics boxplot
-        plt.figure()
-        metrics_df[metricas_plot].boxplot()
-        plt.title(f"Boxplot das métricas de validação {tag.replace('_', ' ')}")
-        plt.ylabel("Valor da métrica")
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        all_plot_path = os.path.join(boxplot_root, "all", f"boxplot_{tag}.png")
-        plt.savefig(all_plot_path)
-        plt.close()
-
-        # Per-metric boxplots
-        for met in metricas_plot:
-            plt.figure()
-            metrics_df.boxplot(column=met)
-            plt.title(f"Boxplot de {met} de validação\n{tag.replace('_', ' ')}")
-            plt.ylabel(f"Valor de {met}")
-            plt.tight_layout()
-            met_dir = os.path.join(boxplot_root, subfolder_map.get(met, met.lower()))
-            os.makedirs(met_dir, exist_ok=True)
-            plt.savefig(os.path.join(met_dir, f"boxplot_{tag}_{met}.png"))
-            plt.close()
-
-        stats = metrics_df.describe().loc[["mean", "std", "min", "max"]]
-        summary = {"model_type": row["model_type"], "position": row["position"],
-                   "scenario": row["scenario"], "label_type": row["label_type"],
-                   "boxplot_path": all_plot_path}
+        stats = metrics_df.describe().loc[["mean", "std"]]
+        summary = {"model_type": row["model_type"],
+                   "scenario": row["scenario"]}
         for met in metricas_plot:
             summary[f"{met}_mean"] = stats.loc["mean", met]
             summary[f"{met}_std"] = stats.loc["std", met]
         summary_rows.append(summary)
 
-    summary_csv = os.path.join(output_dir, "summary_final_models.csv")
-    pd.DataFrame(summary_rows).to_csv(summary_csv, index=False)
+        subject_column = None
+        if "subject_id" in metrics_df.columns:
+            subject_column = "subject_id"
+        elif "Model" in metrics_df.columns:
+            subject_column = "Model"
+
+        if subject_column:
+            for _, metric_row in metrics_df.iterrows():
+                subject_summary = {
+                    "subject_id": metric_row[subject_column],
+                    "model_type": row["model_type"],
+                    "scenario": row["scenario"],
+                }
+                for met in metricas_plot:
+                    subject_summary[met] = metric_row[met]
+                subject_rows.append(subject_summary)
+
+    summary_csv = os.path.join(csv_root, "summary_final_models.csv")
+    summary_df = pd.DataFrame(summary_rows)
+    _save_csv_and_txt(summary_df, summary_csv, "Final Models Summary", output_root=output_dir)
     print(f"Resumo dos modelos finais salvo em: {summary_csv}")
 
+    scenario_dir = os.path.join(csv_root, "summary_final_models_by_scenario")
+    os.makedirs(scenario_dir, exist_ok=True)
+    for scenario in sorted(summary_df["scenario"].unique()):
+        scenario_df = summary_df[summary_df["scenario"] == scenario].reset_index(drop=True)
+        scenario_csv = os.path.join(scenario_dir, f"summary_final_models_{scenario}.csv")
+        _save_csv_and_txt(
+            scenario_df,
+            scenario_csv,
+            f"Final Models Summary - Scenario: {scenario}",
+            output_root=output_dir,
+        )
+        print(f"Resumo do scenario '{scenario}' salvo em: {scenario_csv}")
 
-def _analyze_optuna_trials(df, output_dir):
-    converg_dir = os.path.join(output_dir, "optuna", "convergencia")
-    os.makedirs(converg_dir, exist_ok=True)
-    for _, row in df.iterrows():
-        if not row["optuna_trials"]:
-            continue
-        trials_df = pd.read_csv(row["optuna_trials"])
-        if "value" not in trials_df.columns:
-            continue
-        tag = "_".join(x for x in [row["model_type"], row["position"], row["scenario"], row["label_type"]] if x)
-        plt.figure(figsize=(8, 5))
-        plt.plot(trials_df["value"].cummax(), marker='o')
-        plt.xlabel("Trial")
-        plt.ylabel("Melhor MCC médio de validação acumulado")
-        plt.title(f"Optuna Convergência - {tag.replace('_', ' ')}")
-        plt.grid(True); plt.tight_layout()
-        path = os.path.join(converg_dir, f"optuna_convergencia_{tag}.png")
-        plt.savefig(path); plt.close()
-        print(f"Curva de convergência do Optuna salva em: {path}")
+    model_type_dir = os.path.join(csv_root, "summary_final_models_by_model_type")
+    os.makedirs(model_type_dir, exist_ok=True)
+    for model_type in sorted(summary_df["model_type"].unique()):
+        model_type_df = summary_df[summary_df["model_type"] == model_type].reset_index(drop=True)
+        model_type_csv = os.path.join(model_type_dir, f"summary_final_models_{model_type}.csv")
+        _save_csv_and_txt(
+            model_type_df,
+            model_type_csv,
+            f"Final Models Summary - Model Type: {model_type}",
+            output_root=output_dir,
+        )
+        print(f"Resumo do model_type '{model_type}' salvo em: {model_type_csv}")
+
+    subject_summary_csv = os.path.join(csv_root, "summary_final_models_by_subject.csv")
+    subject_df = pd.DataFrame(subject_rows)
+    _save_csv_and_txt(subject_df, subject_summary_csv, "Final Models Summary by Subject", output_root=output_dir)
+    print(f"Resumo por subject salvo em: {subject_summary_csv}")
+
+    subject_dir = os.path.join(csv_root, "summary_final_models_by_subject")
+    os.makedirs(subject_dir, exist_ok=True)
+    for subject_id in sorted(subject_df["subject_id"].unique()):
+        subject_metrics_df = subject_df[subject_df["subject_id"] == subject_id].reset_index(drop=True)
+        subject_csv = os.path.join(subject_dir, f"summary_final_models_{subject_id}.csv")
+        _save_csv_and_txt(
+            subject_metrics_df,
+            subject_csv,
+            f"Final Models Summary - Subject: {subject_id}",
+            output_root=output_dir,
+        )
+        print(f"Resumo do subject '{subject_id}' salvo em: {subject_csv}")
+
+    return summary_df, subject_df
 
 
-def _analyze_optuna_param_importance(df, output_dir):
-    import optuna as _optuna
-    paramimp_dir = os.path.join(output_dir, "optuna", "param_importance")
-    os.makedirs(paramimp_dir, exist_ok=True)
-    for _, row in df.iterrows():
-        if not row["optuna_db"]:
-            continue
-        tag = f"{row['model_type']}_{row['position']}_{row['scenario']}_{row['label_type']}"
-        try:
-            storage = f"sqlite:///{row['optuna_db']}"
-            studies = _optuna.study.get_all_study_summaries(storage=storage)
-            if not studies:
-                continue
-            study = _optuna.load_study(study_name=studies[0].study_name, storage=storage)
-            fig = _optuna.visualization.plot_param_importances(study)
-            base_path = os.path.join(paramimp_dir, f"optuna_param_importance_{tag}")
-            fig.write_html(base_path + ".html")
-            fig.write_image(base_path + ".png")
-            print(f"Importância dos hiperparâmetros salva em: {base_path}.html / .png")
-        except Exception as e:
-            print(f"[WARN] Não foi possível gerar importância dos hiperparâmetros para {tag}: {e}")
+def _analyze_per_model(summary_df, subject_df, base_dir):
+    """Write per-model summary bundles inside each model folder."""
+    for model_type in sorted(summary_df["model_type"].unique()):
+        model_summary_df = summary_df[summary_df["model_type"] == model_type].reset_index(drop=True)
+        model_subject_df = subject_df[subject_df["model_type"] == model_type].reset_index(drop=True)
+
+        model_analysis_root = os.path.join(base_dir, model_type, "analysis")
+        model_csv_root = os.path.join(model_analysis_root, "csv")
+        os.makedirs(model_csv_root, exist_ok=True)
+
+        model_summary_csv = os.path.join(model_csv_root, f"summary_final_models_{model_type}.csv")
+        _save_csv_and_txt(
+            model_summary_df,
+            model_summary_csv,
+            f"Model Summary - {model_type}",
+            output_root=model_analysis_root,
+        )
+
+        by_scenario_dir = os.path.join(model_csv_root, "summary_by_scenario")
+        os.makedirs(by_scenario_dir, exist_ok=True)
+        for scenario in sorted(model_summary_df["scenario"].unique()):
+            scenario_df = model_summary_df[model_summary_df["scenario"] == scenario].reset_index(drop=True)
+            scenario_csv = os.path.join(by_scenario_dir, f"summary_{model_type}_{scenario}.csv")
+            _save_csv_and_txt(
+                scenario_df,
+                scenario_csv,
+                f"Model Summary - {model_type} - Scenario: {scenario}",
+                output_root=model_analysis_root,
+            )
+
+        by_subject_csv = os.path.join(model_csv_root, f"summary_by_subject_{model_type}.csv")
+        _save_csv_and_txt(
+            model_subject_df,
+            by_subject_csv,
+            f"Model Subject Summary - {model_type}",
+            output_root=model_analysis_root,
+        )
+
+        by_subject_dir = os.path.join(model_csv_root, "summary_by_subject")
+        os.makedirs(by_subject_dir, exist_ok=True)
+        for subject_id in sorted(model_subject_df["subject_id"].unique()):
+            subject_metrics_df = model_subject_df[model_subject_df["subject_id"] == subject_id].reset_index(drop=True)
+            subject_csv = os.path.join(by_subject_dir, f"summary_{model_type}_{subject_id}.csv")
+            _save_csv_and_txt(
+                subject_metrics_df,
+                subject_csv,
+                f"Model Subject Summary - {model_type} - Subject: {subject_id}",
+                output_root=model_analysis_root,
+            )
+        print(f"Pacote de resumo por modelo salvo em: {model_analysis_root}")
+
+
+def _write_master_analysis_tex(output_dir):
+    """Create a minimal master LaTeX file with required packages and \\input statements."""
+    tex_root = os.path.join(output_dir, "tex")
+    if not os.path.exists(tex_root):
+        return
+
+    tex_files = sorted(
+        [
+            os.path.relpath(os.path.join(root, file_name), tex_root).replace("\\", "/")
+            for root, _, files in os.walk(tex_root)
+            for file_name in files
+            if file_name.endswith(".tex") and file_name != "analysis.tex"
+        ]
+    )
+
+    # Keep only compact summaries in the master document.
+    tex_files = [
+        rel_path
+        for rel_path in tex_files
+        if "by_subject" not in rel_path
+    ]
+
+    if not tex_files:
+        return
+
+    lines = [
+        "\\documentclass[11pt]{article}",
+        "\\usepackage[margin=1in]{geometry}",
+        "\\usepackage{booktabs}",
+        "\\usepackage{longtable}",
+        "\\usepackage{caption}",
+        "\\begin{document}",
+    ]
+    for rel_path in tex_files:
+        escaped_rel_path = rel_path.replace("_", "\\_")
+        lines.append(f"\\input{{{escaped_rel_path}}}")
+    lines.append("\\end{document}")
+
+    analysis_tex_path = os.path.join(tex_root, "analysis.tex")
+    with open(analysis_tex_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    print(f"Master LaTeX de análise salvo em: {analysis_tex_path}")
 
 
 def run_analyze(args):
-    """Run global analysis focused on summary, boxplots, and Optuna outputs."""
+    """Run global analysis focused on summary_final_models only."""
     df = _scan_output_dir(args.base_dir)
     print(f"Total de experimentos encontrados: {len(df)}")
     if df.empty:
         print("Nenhum experimento encontrado.")
         return
     out = args.output_dir
-    _analyze_final_models(df, out)
-    _analyze_optuna_trials(df, out)
-    _analyze_optuna_param_importance(df, out)
+    summary_df, subject_df = _analyze_final_models(df, out)
+    _write_master_analysis_tex(out)
+    _analyze_per_model(summary_df, subject_df, args.base_dir)
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -442,7 +639,7 @@ def build_parser():
     # --- analyze ---
     p_ana = subparsers.add_parser("analyze", help="Global analysis of all experiments")
     p_ana.add_argument("--base_dir", default="output", help="Root output directory to scan")
-    p_ana.add_argument("--output_dir", default="analise_global", help="Where to write analysis results")
+    p_ana.add_argument("--output_dir", default="output/analysis", help="Where to write analysis results")
 
     return parser
 

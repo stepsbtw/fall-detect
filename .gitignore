@@ -6,7 +6,11 @@
 /logs
 /output
 /dataset_scripts
-/analise_global
+/analysis
+
+/dataset_fix
+/ok_output
+/models
 
 *.png
 *.jpg
