@@ -155,12 +155,12 @@ def run_shap(args):
     if not os.path.exists(all_metrics_path):
         raise FileNotFoundError(f"Arquivo de métricas não encontrado: {all_metrics_path}")
     metrics_df = pd.read_csv(all_metrics_path)
-    best_row = metrics_df.loc[metrics_df["F1"].idxmax()]
+    best_row = metrics_df.loc[metrics_df["f1"].idxmax()]
     best_label = str(best_row.get("Model", "")).strip()
     if best_label.isdigit():
         best_label = f"s{best_label}"
     if not best_label:
-        best_label = f"s{int(metrics_df['F1'].idxmax()) + 1}"
+        best_label = f"s{int(metrics_df['f1'].idxmax()) + 1}"
 
     best_model_path = os.path.join(
         Config.get_models_dir(model_type, scenario),
@@ -340,13 +340,13 @@ def _aggregate_model_metrics(base_out):
     fold_dirs = sorted(glob.glob(os.path.join(base_out, "fold_s*")))
     for fold_dir in fold_dirs:
         subject_id = os.path.basename(fold_dir)[len("fold_"):]  # e.g. "s1"
-        metrics_file = os.path.join(fold_dir, f"metrics_model_{subject_id}.csv")
+        metrics_file = os.path.join(fold_dir, "metrics.csv")
         if os.path.exists(metrics_file):
             try:
                 df = pd.read_csv(metrics_file)
-                df.insert(0, 'subject_id', subject_id)
+                df.insert(0, 'Model', subject_id)
                 all_metrics.append(df)
-                print(f"Fold {subject_id}: F1={df['F1'].iloc[0]:.4f}, Acc={df['Accuracy'].iloc[0]:.4f}")
+                print(f"Fold {subject_id}: f1={df['f1'].iloc[0]:.4f}, acc={df['acc'].iloc[0]:.4f}")
             except Exception as e:
                 print(f"Erro ao ler métricas do fold {subject_id}: {e}")
         else:
@@ -358,8 +358,7 @@ def _aggregate_model_metrics(base_out):
 
     combined_df = pd.concat(all_metrics, ignore_index=True)
 
-    expected_columns = ['subject_id', 'Model', 'MCC', 'Sensitivity', 'Specificity', 'Precision', 'Accuracy', 'F1',
-                        'tp', 'tn', 'fp', 'fn']
+    expected_columns = ['Model', 'f1', 'acc', 'prec', 'rec', 'tp', 'tn', 'fp', 'fn']
     combined_df = combined_df[[c for c in expected_columns if c in combined_df.columns]]
 
     all_metrics_path = os.path.join(base_out, "all_metrics.csv")
@@ -419,7 +418,7 @@ def _analyze_final_models(df, output_dir):
         if not row["all_metrics"]:
             continue
         metrics_df = pd.read_csv(row["all_metrics"])
-        metricas_plot = [c for c in ["F1", "Accuracy", "Precision", "Sensitivity"]
+        metricas_plot = [c for c in ["f1", "acc", "prec", "rec"]
                          if c in metrics_df.columns]
         if not metricas_plot:
             print(f"Nenhuma métrica reconhecida em {row['all_metrics']}, pulando.")

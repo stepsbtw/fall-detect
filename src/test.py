@@ -15,10 +15,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.metrics import (
     confusion_matrix,
-    classification_report,
     roc_curve,
     roc_auc_score,
-    matthews_corrcoef,
     f1_score,
     accuracy_score,
 )
@@ -64,9 +62,7 @@ def save_results(
 
     cm = confusion_matrix(y_true, y_pred)
     tn, fp, fn, tp = cm.ravel()
-    save_confusion_matrix_txt(cm, output_dir, i)
-
-    save_classification_report(y_pred, y_true, output_dir, i)
+    save_metrics_csv(tp, fp, tn, fn, y_true, y_pred, output_dir)
     plot_roc_curve(y_probs[:, 1], y_true, output_dir, i)
 
     metrics = calculate_metrics(tp, tn, fp, fn, y_true, y_pred)
@@ -96,26 +92,27 @@ def save_results_classical(
 
     cm = confusion_matrix(y_true, y_pred)
     tn, fp, fn, tp = cm.ravel()
-    save_confusion_matrix_txt(cm, output_dir, i)
-
-    save_classification_report(y_pred, y_true, output_dir, i)
+    save_metrics_csv(tp, fp, tn, fn, y_true, y_pred, output_dir)
     plot_roc_curve(y_probs[:, 1], y_true, output_dir, i)
 
     metrics = calculate_metrics(tp, tn, fp, fn, y_true, y_pred)
     record_metrics(metrics, tp, tn, fp, fn, i, output_dir)
 
 
-def save_confusion_matrix_txt(cm, output_dir, i):
-    """Save confusion matrix as plain text."""
-    labels = ["Nao Queda", "Queda"]
-    path = os.path.join(output_dir, f"confusion_matrix_model_{i}.txt")
+def save_metrics_csv(tp, fp, tn, fn, y_true, y_pred, output_dir):
+    """Save compact binary classification metrics as CSV."""
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = f1_score(y_true, y_pred, pos_label=Config.METRICS_CONFIG["fall_class"], zero_division=0)
+    acc = accuracy_score(y_true, y_pred)
+
+    path = os.path.join(output_dir, "metrics.csv")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(f"Matriz de Confusao - Modelo {i}\n")
-        f.write("=" * 32 + "\n\n")
-        f.write("Formato: linhas=Real, colunas=Predito\n\n")
-        f.write(f"{'':>12}{labels[0]:>12}{labels[1]:>12}\n")
-        f.write(f"{labels[0]:>12}{int(cm[0, 0]):>12}{int(cm[0, 1]):>12}\n")
-        f.write(f"{labels[1]:>12}{int(cm[1, 0]):>12}{int(cm[1, 1]):>12}\n")
+        f.write("prec,rec,f1,acc,tp,fp,tn,fn\n")
+        f.write(
+            f"{precision:.6f},{recall:.6f},{f1:.6f},{acc:.6f},"
+            f"{int(tp)},{int(fp)},{int(tn)},{int(fn)}\n"
+        )
 
 
 def plot_roc_curve(y_score, y_true, output_dir, i):
@@ -156,7 +153,6 @@ def plot_loss_curve(train_losses, val_losses, output_dir, model_idx):
 
 def calculate_metrics(tp, tn, fp, fn, y_true, y_pred):
     """Calculate evaluation metrics from confusion matrix counts."""
-    mcc = matthews_corrcoef(y_true, y_pred)
     sensitivity = tp / (tp + fn + 1e-10)
     specificity = tn / (tn + fp + 1e-10)
     precision = tp / (tp + fp + 1e-10)
@@ -164,25 +160,17 @@ def calculate_metrics(tp, tn, fp, fn, y_true, y_pred):
     f1 = f1_score(y_true, y_pred, pos_label=Config.METRICS_CONFIG["fall_class"], zero_division=0)
 
     return {
-        "MCC": mcc,
         "Sensitivity": sensitivity,
         "Specificity": specificity,
         "Precision": precision,
         "Accuracy": accuracy,
-        "F1": f1,
+        "f1": f1,
     }
 
 
 def record_metrics(metrics, tp, tn, fp, fn, i, output_dir):
     """Per-model metrics CSV output is intentionally disabled."""
     _ = (metrics, tp, tn, fp, fn, i, output_dir)
-
-
-def save_classification_report(y_pred, y_true, output_dir, i):
-    """Persist sklearn classification report as text."""
-    classification_report(y_true, y_pred, output_dict=True, zero_division=0)
-    with open(os.path.join(output_dir, f"classification_report_model_{i}.txt"), "w") as f:
-        f.write(classification_report(y_true, y_pred, zero_division=0))
 
 
 def load_model_state(model, path, device="cpu"):
@@ -338,7 +326,6 @@ def plot_learning_curve(
 
         y_preds = np.concatenate(y_preds)
         y_true_final = np.concatenate(y_true_final)
-        mcc = matthews_corrcoef(y_true_final, y_preds)
         f1 = f1_score(y_true_final, y_preds, average="macro")
         acc = accuracy_score(y_true_final, y_preds)
         weighted_train_loss_mean = float(np.mean(train_losses))
@@ -348,8 +335,7 @@ def plot_learning_curve(
             {
                 "Fraction": frac,
                 "Num_Groups": int(len(np.unique(groups_subset))),
-                "MCC": mcc,
-                "F1": f1,
+                "f1": f1,
                 "Accuracy": acc,
                 "Weighted_Train_Loss": weighted_train_loss_mean,
                 "Weighted_Val_Loss": weighted_val_loss_mean,
@@ -358,7 +344,7 @@ def plot_learning_curve(
             }
         )
         print(
-            f"MCC: {mcc:.4f} | F1: {f1:.4f} | Acc: {acc:.4f} | "
+            f"F1: {f1:.4f} | Acc: {acc:.4f} | "
             f"W-Train Loss: {weighted_train_loss_mean:.4f} | W-Val Loss: {weighted_val_loss_mean:.4f}"
         )
 
@@ -370,8 +356,7 @@ def plot_learning_curve(
 
     plt.figure(figsize=(10, 7))
     xvals = df["Num_Groups"] if "Num_Groups" in df.columns else (df["Fraction"] * 100)
-    plt.plot(xvals, df["MCC"], marker="o", label="MCC")
-    plt.plot(xvals, df["F1"], marker="o", label="F1-score")
+    plt.plot(xvals, df["f1"], marker="o", label="F1-score")
     plt.plot(xvals, df["Accuracy"], marker="o", label="Accuracy")
     plt.plot(xvals, df["Weighted_Train_Loss"], marker="o", label="Weighted Train Loss")
     plt.plot(xvals, df["Weighted_Val_Loss"], marker="o", label="Weighted Val Loss")
