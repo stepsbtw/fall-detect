@@ -54,7 +54,6 @@ import numpy as np
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-LOG_DIR    = SCRIPT_DIR / "logs"
 SRC_DIR    = SCRIPT_DIR / "src"
 
 sys.path.insert(0, str(SRC_DIR))
@@ -89,45 +88,84 @@ def _expected_folds(scenario: str) -> int:
     return 15  # safe fallback
 
 
-def is_train_done(model: str, scenario: str) -> bool:
+def _train_scenario_out(
+    model: str,
+    scenario: str,
+    loss: str = "weighted",
+    inner_val_groups: int = 1,
+    scale: bool = False,
+    no_mag: bool = False,
+    only_mag: bool = False,
+) -> str:
+    scenario_out = scenario if loss == "weighted" else scenario + "_NW"
+    if not is_classical(model):
+        scenario_out = f"{scenario_out}_IVG{max(int(inner_val_groups), 1)}"
+    if scale:
+        scenario_out = f"{scenario_out}_SC"
+    if no_mag:
+        scenario_out = f"{scenario_out}_NM"
+    if only_mag:
+        scenario_out = f"{scenario_out}_OM"
+    return scenario_out
+
+
+def is_train_done(
+    model: str,
+    scenario: str,
+    loss: str = "weighted",
+    inner_val_groups: int = 1,
+    scale: bool = False,
+    no_mag: bool = False,
+    only_mag: bool = False,
+) -> bool:
     """Return True if every LOGO fold for this combo has a completed metrics file."""
-    output_dir = SCRIPT_DIR / "output" / model / scenario
+    scenario_out = _train_scenario_out(model, scenario, loss, inner_val_groups, scale, no_mag, only_mag)
+    output_dir = SCRIPT_DIR / "output" / model / scenario_out
     done = list(output_dir.glob("fold_s*/metrics_model_s*.csv"))
     return len(done) >= _expected_folds(scenario)
 
 
-def is_aggregate_done(model: str, scenario: str) -> bool:
-    """Return True when aggregate outputs already exist for this combo."""
-    output_dir = SCRIPT_DIR / "output" / model / scenario
+def is_aggregate_done(model: str, scenario_out: str) -> bool:
+    """Return True when aggregate outputs already exist for this variant."""
+    output_dir = SCRIPT_DIR / "output" / model / scenario_out
     all_metrics = output_dir / "all_metrics.csv"
     summary_metrics = output_dir / "summary_metrics.csv"
     return all_metrics.exists() and summary_metrics.exists()
 
 
-def run_command(cmd: list[str], log_path: Path) -> None:
-    """Run *cmd*, tee stdout+stderr to *log_path*, and raise on failure."""
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8", errors="replace") as log_fh:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=SRC_DIR,
-        )
-        for line in process.stdout:
-            print(line, end="")
-            log_fh.write(line)
-        process.wait()
+def run_command(cmd: list[str]) -> None:
+    """Run *cmd*, print stdout+stderr to console, and raise on failure."""
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=SRC_DIR,
+    )
+    for line in process.stdout:
+        print(line, end="")
+    process.wait()
     if process.returncode != 0:
         raise subprocess.CalledProcessError(process.returncode, cmd)
 
 
-def run_train(model: str, scenario: str, epochs: int) -> None:
-    log = LOG_DIR / f"{model}_{scenario}_train.log"
-    print(f">>  train  model={model}  scenario={scenario}")
+def run_train(
+    model: str,
+    scenario: str,
+    epochs: int,
+    loss: str = "weighted",
+    inner_val_groups: int = 1,
+    scale: bool = False,
+    no_mag: bool = False,
+    only_mag: bool = False,
+) -> None:
+    scenario_out = _train_scenario_out(model, scenario, loss, inner_val_groups, scale, no_mag, only_mag)
+    print(
+        f">>  train  model={model}  scenario={scenario}  loss={loss}  "
+        f"inner_val_groups={inner_val_groups}  scale={scale}  no_mag={no_mag}  only_mag={only_mag}"
+    )
     cmd = [
         sys.executable,
         "-u",
@@ -136,15 +174,24 @@ def run_train(model: str, scenario: str, epochs: int) -> None:
         scenario,
         "--model",
         model,
+        "--loss",
+        loss,
+        "--inner-val-groups",
+        str(inner_val_groups),
     ]
     if not is_classical(model):
         cmd += ["--epochs", str(epochs)]
-    run_command(cmd, log)
-    print(f"    done  (log: {log})")
+    if scale:
+        cmd += ["--scale"]
+    if no_mag:
+        cmd += ["--no-mag"]
+    if only_mag:
+        cmd += ["--only-mag"]
+    run_command(cmd)
+    print(f"    done.")
 
 
 def run_nested(model: str, scenario: str, n_trials: int, epochs: int, inner: str) -> None:
-    log = LOG_DIR / f"{model}_{scenario}_nested.log"
     print(f">>  nested  model={model}  scenario={scenario}  n_trials={n_trials}  inner={inner}")
     cmd = [
         sys.executable,
@@ -161,28 +208,26 @@ def run_nested(model: str, scenario: str, n_trials: int, epochs: int, inner: str
     ]
     if not is_classical(model):
         cmd += ["--epochs", str(epochs)]
-    run_command(cmd, log)
-    print(f"    done  (log: {log})")
+    run_command(cmd)
+    print(f"    done.")
 
 
-def run_aggregate(model: str, scenario: str) -> None:
-    log = LOG_DIR / f"{model}_{scenario}_aggregate.log"
-    print(f">>  aggregate  model={model}  scenario={scenario}")
+def run_aggregate(model: str, scenario_out: str) -> None:
+    print(f">>  aggregate  model={model}  scenario_out={scenario_out}")
     cmd = [sys.executable, "-u", "analysis.py", "aggregate",
-           "-scenario", scenario,
+           "-scenario", scenario_out,
            "--model", model]
-    run_command(cmd, log)
-    print(f"    done  (log: {log})")
+    run_command(cmd)
+    print(f"    done.")
 
 
 def run_analyze(output_dir: str = "output/analysis") -> None:
-    log = LOG_DIR / "analyze_global.log"
     print(f">>  analyze  output_dir={output_dir}")
     cmd = [sys.executable, "-u", "analysis.py", "analyze",
            "--base_dir", "../output",
            "--output_dir", f"../{output_dir}"]
-    run_command(cmd, log)
-    print(f"    done  (log: {log})")
+    run_command(cmd)
+    print(f"    done.")
 
 
 def is_global_analysis_done(output_dir: str = "output/analysis") -> bool:
@@ -209,6 +254,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs",     type=int, default=Config.TRAINING_CONFIG["epochs"],    metavar="N")
     parser.add_argument("--inner",      choices=["kfold", "holdout", "none"], default="kfold",
                         help="Inner CV for --nested: kfold=GroupKFold(k=3), holdout=GroupShuffleSplit(n=1), none=in-sample (default=kfold)")
+    parser.add_argument(
+        "--loss",
+        choices=["weighted", "unweighted"],
+        default="weighted",
+        help="Loss weighting for neural models: 'weighted' uses inverse-frequency class weights (default); "
+             "'unweighted' uses plain CrossEntropyLoss. Results are saved to <scenario>_NW dirs.",
+    )
+    parser.add_argument(
+        "--inner_val_groups",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Group-wise inner validation size for --train (held-out training subjects per outer fold, default=1).",
+    )
+    parser.add_argument(
+        "--scale",
+        action="store_true",
+        default=False,
+        help="Fit a StandardScaler on the training split of each LOGO fold and apply it "
+             "to validation and test. Scaled runs are saved to <scenario>_SC directories.",
+    )
+    parser.add_argument(
+        "--no-mag",
+        dest="no_mag",
+        action="store_true",
+        default=False,
+        help="Drop the engineered magnitude channels (mag_acc, mag_gyr) from every sensor "
+             "block before training. Results are saved to <scenario>_NM directories.",
+    )
+    parser.add_argument(
+        "--only-mag",
+        dest="only_mag",
+        action="store_true",
+        default=False,
+        help="Keep only the engineered magnitude channels (mag_acc, mag_gyr), dropping raw axes. "
+             "Results are saved to <scenario>_OM directories.",
+    )
     return parser.parse_args()
 
 
@@ -240,6 +322,11 @@ def main() -> None:
     print(f"  Combos   : {total}")
     if args.train:
         print(f"  epochs    : {args.epochs} (NN only)")
+        print(f"  loss      : {args.loss} (NN only)")
+        print(f"  inner val : {args.inner_val_groups} groups (NN only)")
+        print(f"  scale     : {args.scale}")
+        print(f"  no_mag    : {args.no_mag}")
+        print(f"  only_mag  : {args.only_mag}")
     if args.nested:
         print(f"  n_trials  : {args.n_trials} (inner, per outer fold) | epochs: {args.epochs} (NN only)")
         print(f"  inner     : {args.inner}")
@@ -258,10 +345,19 @@ def main() -> None:
             print(f"-- [{count}/{total}]  {model} / {scenario} --")
 
             if args.train:
-                if is_train_done(model, scenario):
+                if is_train_done(model, scenario, args.loss, args.inner_val_groups, args.scale, args.no_mag, args.only_mag):
                     print(f"   [skip] train {model}/{scenario} — all folds already done.")
                 else:
-                    run_train(model, scenario, args.epochs)
+                    run_train(
+                        model,
+                        scenario,
+                        args.epochs,
+                        args.loss,
+                        args.inner_val_groups,
+                        args.scale,
+                        args.no_mag,
+                        args.only_mag,
+                    )
 
             if args.nested:
                 run_nested(model, scenario, args.n_trials, args.epochs, args.inner)
@@ -273,8 +369,31 @@ def main() -> None:
 
     print("=" * 56)
     print(f"  All done ({total} combos).")
-    print(f"  Logs saved to: {LOG_DIR}/")
     print("=" * 56)
+
+
+def _discover_variant_dirs(models: list, scenarios: list) -> list[tuple[str, str]]:
+    """Return (model, scenario_out) for every variant directory that has fold data.
+
+    A variant directory matches when its name equals a base scenario name or starts
+    with '<base_scenario>_' (e.g. chest_T, chest_T_IVG1, chest_T_IVG1_SC_NM).
+    """
+    combos = []
+    for model in models:
+        model_dir = SCRIPT_DIR / "output" / model
+        if not model_dir.exists():
+            continue
+        for variant_dir in sorted(model_dir.iterdir()):
+            if not variant_dir.is_dir() or variant_dir.name == "analysis":
+                continue
+            if not any(
+                variant_dir.name == s or variant_dir.name.startswith(s + "_")
+                for s in scenarios
+            ):
+                continue
+            if list(variant_dir.glob("fold_s*/metrics.csv")):
+                combos.append((model, variant_dir.name))
+    return combos
 
 
 def _run_full_analysis(models: list, scenarios: list) -> None:
@@ -286,23 +405,16 @@ def _run_full_analysis(models: list, scenarios: list) -> None:
 
     aggregated = 0
     skipped = 0
-    for model in models:
-        for scenario in scenarios:
-            output_dir = SCRIPT_DIR / "output" / model / scenario
-            fold_csvs = list(output_dir.glob("fold_s*/metrics_model_s*.csv"))
-            if not fold_csvs:
-                print(f"   [skip] aggregate {model}/{scenario} — no fold data found.")
-                skipped += 1
-                continue
-            if is_aggregate_done(model, scenario):
-                print(f"   [skip] aggregate {model}/{scenario} — metrics already aggregated.")
-                skipped += 1
-                continue
-            try:
-                run_aggregate(model, scenario)
-                aggregated += 1
-            except subprocess.CalledProcessError as exc:
-                print(f"   [error] aggregate {model}/{scenario} failed (exit {exc.returncode}), continuing.")
+    for model, scenario_out in _discover_variant_dirs(models, scenarios):
+        if is_aggregate_done(model, scenario_out):
+            print(f"   [skip] aggregate {model}/{scenario_out} — metrics already aggregated.")
+            skipped += 1
+            continue
+        try:
+            run_aggregate(model, scenario_out)
+            aggregated += 1
+        except subprocess.CalledProcessError as exc:
+            print(f"   [error] aggregate {model}/{scenario_out} failed (exit {exc.returncode}), continuing.")
 
     print()
     print(f"  Aggregate complete — {aggregated} combos processed, {skipped} skipped.")

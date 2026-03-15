@@ -377,7 +377,11 @@ def _aggregate_model_metrics(base_out):
 
 def run_aggregate(args):
     """Aggregate metrics for a trained scenario."""
-    base_out = Config.get_output_dir(args.model, args.scenario)
+    # If scenario contains _ (variant), use as output subdir directly; else use Config.get_output_dir
+    if "_" in args.scenario:
+        base_out = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", args.model, args.scenario)
+    else:
+        base_out = Config.get_output_dir(args.model, args.scenario)
     print(f"Diretório de saída: {base_out}")
 
     if not os.path.exists(base_out):
@@ -633,7 +637,10 @@ def build_parser():
 
     # --- aggregate ---
     p_agg = subparsers.add_parser("aggregate", help="Aggregate per-model metrics")
-    add_scenario_nn(p_agg, nn_required=True)
+    p_agg.add_argument("-scenario", required=True,
+                       help="Scenario variant name (e.g. chest_T, chest_T_IVG1_SC_NM)")
+    p_agg.add_argument("--model", required=True,
+                       choices=["CNN1D", "MLP", "LSTM", "RF", "SVM", "XGBoost", "CatBoost"])
 
     # --- analyze ---
     p_ana = subparsers.add_parser("analyze", help="Global analysis of all experiments")

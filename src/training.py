@@ -10,6 +10,7 @@ from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import LinearSVC
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 try:
@@ -225,11 +226,61 @@ def _make_classical_model(model_type, params, y_train):
 SCENARIO_CHOICES = list(Config.SCENARIOS.keys())
 
 
+def drop_mag_channels(X):
+    """Drop the engineered magnitude channels (mag_acc and mag_gyr) from X.
+
+    Channel layout per 8-channel sensor block:
+      0: mag_acc  1: acc_x  2: acc_y  3: acc_z
+      4: mag_gyr  5: gyr_x  6: gyr_y  7: gyr_z
+
+    Drops indices 0 and 4 for each sensor block, so:
+      8-ch  -> 6-ch  (drop [0,4])
+      16-ch -> 12-ch (drop [0,4,8,12])
+      24-ch -> 18-ch (drop [0,4,8,12,16,20])
+    """
+    C = X.shape[2]
+    n_sensors = C // 8
+    mag_cols = {s * 8 + offset for s in range(n_sensors) for offset in (0, 4)}
+    keep_cols = [c for c in range(C) if c not in mag_cols]
+    return X[:, :, keep_cols]
+
+
+def keep_only_mag_channels(X):
+    """Keep only the engineered magnitude channels (mag_acc and mag_gyr), drop raw axes.
+
+    Channel layout per 8-channel sensor block:
+      0: mag_acc  1: acc_x  2: acc_y  3: acc_z
+      4: mag_gyr  5: gyr_x  6: gyr_y  7: gyr_z
+
+    Keeps indices 0 and 4 for each sensor block, so:
+      8-ch  -> 2-ch  (keep [0,4])
+      16-ch -> 4-ch  (keep [0,4,8,12])
+      24-ch -> 6-ch  (keep [0,4,8,12,16,20])
+    """
+    C = X.shape[2]
+    n_sensors = C // 8
+    keep_cols = [s * 8 + offset for s in range(n_sensors) for offset in (0, 4)]
+    return X[:, :, keep_cols]
+
+
+def _input_shape_from_data(X, model_type):
+    """Derive the correct input_shape for a model from the actual data array."""
+    _, T, C = X.shape
+    if model_type == "MLP":
+        return T * C
+    return (T, C)  # CNN1D and LSTM
+
+
 def run_final_training(args):
     """Outer LOGO over all subjects using Config.DEFAULT_PARAMS, no HP search."""
     scenario = args.scenario
     model_type_arg = args.model
     epochs = args.epochs
+    loss_type = getattr(args, "loss", "weighted")
+    inner_val_groups = max(int(getattr(args, "inner_val_groups", 3)), 1)
+    scale = getattr(args, "scale", False)
+    no_mag = getattr(args, "no_mag", False)
+    only_mag = getattr(args, "only_mag", False)
 
     if not model_type_arg:
         raise ValueError("--model e obrigatorio para o modo train.")
@@ -237,13 +288,31 @@ def run_final_training(args):
     model_type = model_type_arg
     best_params = Config.DEFAULT_PARAMS[model_type]
     print(f"Usando parametros padrao para {model_type}: {best_params}")
+    print(f"Loss: {loss_type} class weights")
+    print(f"Inner validation groups per outer fold: {inner_val_groups}")
 
-    base_out = Config.get_output_dir(model_type_arg, scenario)
+    scenario_out = scenario if loss_type == "weighted" else scenario + "_NW"
+    if model_type not in Config.CLASSICAL_MODELS:
+        scenario_out = f"{scenario_out}_IVG{inner_val_groups}"
+    if scale:
+        scenario_out = f"{scenario_out}_SC"
+    if no_mag:
+        scenario_out = f"{scenario_out}_NM"
+    if only_mag:
+        scenario_out = f"{scenario_out}_OM"
+    base_out = Config.get_output_dir(model_type_arg, scenario_out)
     os.makedirs(base_out, exist_ok=True)
 
     X = np.load(Config.get_data_file(scenario))
     y = np.load(Config.get_labels_file(scenario)).astype(np.int64)
     groups = np.load(Config.get_groups_file(scenario))
+
+    if no_mag:
+        X = drop_mag_channels(X)
+        print(f"Dropped magnitude channels — new X shape: {X.shape}")
+    if only_mag:
+        X = keep_only_mag_channels(X)
+        print(f"Kept only magnitude channels — new X shape: {X.shape}")
 
     unique_subjects = np.unique(groups)
     print(f"Sujeitos (LOGO): {sorted(unique_subjects.tolist())} ({len(unique_subjects)} total)")
@@ -257,7 +326,7 @@ def run_final_training(args):
         for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
             left_out = groups[test_idx[0]]
             fold_dir = os.path.join(base_out, f"fold_s{left_out}")
-            model_fold_dir = os.path.join(Config.get_models_dir(model_type_arg, scenario), f"fold_s{left_out}")
+            model_fold_dir = os.path.join(Config.get_models_dir(model_type_arg, scenario_out), f"fold_s{left_out}")
             fold_label = f"s{left_out}"
             done_marker = os.path.join(fold_dir, f"metrics_model_{fold_label}.csv")
             if os.path.exists(done_marker):
@@ -269,6 +338,10 @@ def run_final_training(args):
             y_tr = y[train_idx]
             X_te = X[test_idx].reshape(len(test_idx), -1)
             y_te = y[test_idx]
+            if scale:
+                ss = StandardScaler()
+                X_tr = ss.fit_transform(X_tr)
+                X_te = ss.transform(X_te)
             clf = _make_classical_model(model_type, best_params, y_tr)
             clf.fit(X_tr, y_tr)
             save_results_classical(
@@ -286,13 +359,17 @@ def run_final_training(args):
 
     input_shape_dict = Config.get_input_shape_dict(scenario, model_type)
     input_shape = input_shape_dict[model_type]
+    if no_mag:
+        input_shape = _input_shape_from_data(X, model_type)
+    if only_mag:
+        input_shape = _input_shape_from_data(X, model_type)
     batch_size = Config.TRAINING_CONFIG.get("batch_size", 32)
 
     Config.set_seed(Config.FINAL_TRAINING["seed_offset"])
     for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
         left_out = groups[test_idx[0]]
         fold_dir = os.path.join(base_out, f"fold_s{left_out}")
-        model_fold_dir = os.path.join(Config.get_models_dir(model_type_arg, scenario), f"fold_s{left_out}")
+        model_fold_dir = os.path.join(Config.get_models_dir(model_type_arg, scenario_out), f"fold_s{left_out}")
         fold_label = f"s{left_out}"
         done_marker = os.path.join(fold_dir, f"metrics_model_{fold_label}.csv")
         if os.path.exists(done_marker):
@@ -306,8 +383,17 @@ def run_final_training(args):
         groups_train = groups[train_idx]
 
         inner_subjects = np.unique(groups_train)
-        val_subject = inner_subjects[fold_idx % len(inner_subjects)]
-        val_mask = groups_train == val_subject
+        n_val_groups = min(inner_val_groups, len(inner_subjects) - 1)
+        if n_val_groups <= 0:
+            raise ValueError(
+                "Inner validation requires at least 2 training groups in each outer fold."
+            )
+        start_idx = fold_idx % len(inner_subjects)
+        val_subjects = [
+            inner_subjects[(start_idx + k) % len(inner_subjects)] for k in range(n_val_groups)
+        ]
+        val_mask = np.isin(groups_train, val_subjects)
+        print(f"    Validation subjects: {sorted(np.array(val_subjects).tolist())}")
         X_train = X_train_all[~val_mask]
         y_train = y_train_all[~val_mask]
         X_es = X_train_all[val_mask]
@@ -315,6 +401,13 @@ def run_final_training(args):
 
         X_test = X[test_idx]
         y_test = y[test_idx]
+
+        if scale:
+            N_tr, T, C = X_train.shape
+            ss = StandardScaler()
+            X_train = ss.fit_transform(X_train.reshape(-1, C)).reshape(N_tr, T, C)
+            X_es   = ss.transform(X_es.reshape(-1, C)).reshape(X_es.shape[0], T, C)
+            X_test = ss.transform(X_test.reshape(-1, C)).reshape(X_test.shape[0], T, C)
 
         model = create_model(model_type, best_params, input_shape, Config.NUM_LABELS)
         model.to(Config.DEVICE)
@@ -325,10 +418,13 @@ def run_final_training(args):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=0.5, patience=10, min_lr=1e-6
         )
-        class_counts = np.bincount(y_train, minlength=Config.NUM_LABELS)
-        class_weights = len(y_train) / (Config.NUM_LABELS * class_counts.astype(float))
-        weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(Config.DEVICE)
-        criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+        if loss_type == "weighted":
+            class_counts = np.bincount(y_train, minlength=Config.NUM_LABELS)
+            class_weights = len(y_train) / (Config.NUM_LABELS * class_counts.astype(float))
+            weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(Config.DEVICE)
+            criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+        else:
+            criterion = nn.CrossEntropyLoss()
 
         train_loader = DataLoader(
             TensorDataset(
@@ -395,6 +491,44 @@ def build_parser():
         choices=["CNN1D", "MLP", "LSTM", "RF", "SVM", "XGBoost", "CatBoost"],
     )
     parser.add_argument("--epochs", type=int, default=Config.TRAINING_CONFIG["epochs"])
+    parser.add_argument(
+        "--loss",
+        choices=["weighted", "unweighted"],
+        default="weighted",
+        help="Loss weighting: 'weighted' uses inverse-frequency class weights (default); "
+             "'unweighted' uses plain CrossEntropyLoss. Unweighted results are saved to "
+             "<scenario>_NW directories.",
+    )
+    parser.add_argument(
+        "--inner-val-groups",
+        type=int,
+        default=3,
+        help="Number of training subjects held out for inner validation in each outer LOGO fold "
+             "(group-wise, default=3).",
+    )
+    parser.add_argument(
+        "--scale",
+        action="store_true",
+        default=False,
+        help="Fit a StandardScaler on the training split of each LOGO fold and apply it to "
+             "validation and test. Scaled runs are saved to <scenario>_SC directories.",
+    )
+    parser.add_argument(
+        "--no-mag",
+        dest="no_mag",
+        action="store_true",
+        default=False,
+        help="Drop the engineered magnitude channels (mag_acc, mag_gyr) from every sensor block "
+             "before training. Results are saved to <scenario>_NM directories.",
+    )
+    parser.add_argument(
+        "--only-mag",
+        dest="only_mag",
+        action="store_true",
+        default=False,
+        help="Keep only the engineered magnitude channels (mag_acc, mag_gyr), dropping raw axes. "
+             "Results are saved to <scenario>_OM directories.",
+    )
     return parser
 
 
