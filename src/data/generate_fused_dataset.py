@@ -47,7 +47,9 @@ TRANSITION_ACTIVITIES = frozenset([
 ])
 
 # Nominal window sizes used by the original pipeline (obs per 5-second window)
-DEFAULT_ARRAY_SIZES = {"CHEST": 1100, "LEFT": 460, "RIGHT": 460}
+#DEFAULT_ARRAY_SIZES = {"CHEST": 1100, "LEFT": 460, "RIGHT": 460}
+DEFAULT_ARRAY_SIZES = {"CHEST": 460, "LEFT": 460, "RIGHT": 460}
+
 
 WINDOW_MS = 5_000  # 5 seconds expressed in milliseconds
 

@@ -82,70 +82,99 @@ for position in args.positions:
 
     # ── 1. File existence ──────────────────────────────────────────────────
     print("\n-- File existence --")
-    missing = False
-    for p in [time_path, freq_path, label_path, groups_path]:
-        if os.path.isfile(p):
+
+    file_exists = {
+        "time": os.path.isfile(time_path),
+        "freq": os.path.isfile(freq_path),
+        "labels": os.path.isfile(label_path),
+        "groups": os.path.isfile(groups_path),
+    }
+    for k, p in zip(file_exists.keys(), [time_path, freq_path, label_path, groups_path]):
+        if file_exists[k]:
             ok(os.path.basename(p))
         else:
             fail(f"MISSING: {p}")
-            missing = True
 
-    if missing:
-        warn("Skipping further checks for this position (files missing)")
+    # Only load arrays that exist
+    time_arr = freq_arr = labels = groups = None
+    if file_exists["time"]:
+        time_arr = np.load(time_path)
+    if file_exists["freq"]:
+        freq_arr = np.load(freq_path)
+    if file_exists["labels"]:
+        labels = np.load(label_path)
+    if file_exists["groups"]:
+        groups = np.load(groups_path)
+
+    # If labels or groups are missing, cannot continue with most checks
+    if not (file_exists["labels"] and file_exists["groups"]):
+        warn("labels.npy or groups.npy missing, skipping further checks for this position")
         continue
 
     # ── 2. Load arrays ────────────────────────────────────────────────────
-    time_arr   = np.load(time_path)
-    freq_arr   = np.load(freq_path)
-    labels     = np.load(label_path)
-    groups     = np.load(groups_path)
 
     print(f"\n-- Shapes --")
-    print(f"  time  : {time_arr.shape}")
-    print(f"  freq  : {freq_arr.shape}")
+    if time_arr is not None:
+        print(f"  time  : {time_arr.shape}")
+    else:
+        print(f"  time  : [NOT LOADED]")
+    if freq_arr is not None:
+        print(f"  freq  : {freq_arr.shape}")
+    else:
+        print(f"  freq  : [NOT LOADED]")
     print(f"  labels: {labels.shape}")
     print(f"  groups: {groups.shape}")
 
     N = labels.shape[0]
 
     # ── 3. Shape consistency ──────────────────────────────────────────────
+
     print("\n-- Shape consistency --")
     for name, arr in [("time", time_arr), ("freq", freq_arr), ("groups", groups)]:
-        if arr.shape[0] == N:
-            ok(f"{name}.shape[0] == {N}")
-        else:
-            fail(f"{name}.shape[0] = {arr.shape[0]}, expected {N} (from labels)")
+        if arr is not None:
+            if arr.shape[0] == N:
+                ok(f"{name}.shape[0] == {N}")
+            else:
+                fail(f"{name}.shape[0] = {arr.shape[0]}, expected {N} (from labels)")
 
     # ── 4. Window size ────────────────────────────────────────────────────
+
     print("\n-- Window dimensions --")
     exp_t = EXPECTED_ARRAY_SIZE[position]
     exp_f = EXPECTED_FREQ_SIZE[position]
 
-    if time_arr.ndim == 3 and time_arr.shape[1] == exp_t:
-        ok(f"time window size = {time_arr.shape[1]} (expected {exp_t})")
-    else:
-        fail(f"time window size = {time_arr.shape[1] if time_arr.ndim==3 else '?'}, expected {exp_t}")
-
-    if freq_arr.ndim == 3 and freq_arr.shape[1] == exp_f:
-        ok(f"freq window size = {freq_arr.shape[1]} (expected {exp_f})")
-    else:
-        fail(f"freq window size = {freq_arr.shape[1] if freq_arr.ndim==3 else '?'}, expected {exp_f}")
+    if time_arr is not None:
+        if time_arr.ndim == 3 and time_arr.shape[1] == exp_t:
+            ok(f"time window size = {time_arr.shape[1]} (expected {exp_t})")
+        else:
+            fail(f"time window size = {time_arr.shape[1] if time_arr.ndim==3 else '?'} , expected {exp_t}")
+    if freq_arr is not None:
+        if freq_arr.ndim == 3 and freq_arr.shape[1] == exp_f:
+            ok(f"freq window size = {freq_arr.shape[1]} (expected {exp_f})")
+        else:
+            fail(f"freq window size = {freq_arr.shape[1] if freq_arr.ndim==3 else '?'} , expected {exp_f}")
 
     # ── 5. Channel count ──────────────────────────────────────────────────
+
     print("\n-- Channel count --")
     for name, arr in [("time", time_arr), ("freq", freq_arr)]:
-        ch = arr.shape[2] if arr.ndim == 3 else "?"
-        if ch == EXPECTED_CHANNELS:
-            ok(f"{name} channels = {ch}")
-        else:
-            fail(f"{name} channels = {ch}, expected {EXPECTED_CHANNELS}")
+        if arr is not None:
+            ch = arr.shape[2] if arr.ndim == 3 else "?"
+            if ch == EXPECTED_CHANNELS:
+                ok(f"{name} channels = {ch}")
+            else:
+                fail(f"{name} channels = {ch}, expected {EXPECTED_CHANNELS}")
 
     # ── 6. NaN / Inf ──────────────────────────────────────────────────────
+
     print("\n-- NaN / Inf checks --")
-    check_finite(time_arr, "time_domain")
-    check_finite(freq_arr, "freq_domain")
+    if time_arr is not None:
+        check_finite(time_arr, "time_domain")
+    if freq_arr is not None:
+        check_finite(freq_arr, "freq_domain")
 
     # ── 7. Label values ───────────────────────────────────────────────────
+
     print("\n-- Label values --")
     unique_labels = set(np.unique(labels).tolist())
     invalid_labels = unique_labels - VALID_LABELS
@@ -155,6 +184,7 @@ for position in args.positions:
         ok(f"All label values in {VALID_LABELS}")
 
     # ── 8. Group IDs ──────────────────────────────────────────────────────
+
     print("\n-- Group IDs --")
     unique_groups = set(np.unique(groups).tolist())
     invalid_groups = unique_groups - VALID_GROUPS
@@ -170,6 +200,7 @@ for position in args.positions:
         ok(f"All 15 individuals present")
 
     # ── 9. Class balance ──────────────────────────────────────────────────
+
     print("\n-- Class balance --")
     n_fall    = int((labels == 1).sum())
     n_no_fall = int((labels == 0).sum())
@@ -185,6 +216,7 @@ for position in args.positions:
         ok("Class balance looks reasonable")
 
     # ── 10. Per-group breakdown ───────────────────────────────────────────
+
     print("\n-- Per-group sample counts --")
     print(f"  {'ID':<6} {'total':>7} {'fall':>7} {'non-fall':>10} {'fall%':>7}")
     print(f"  {'-'*6} {'-'*7} {'-'*7} {'-'*10} {'-'*7}")

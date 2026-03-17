@@ -247,3 +247,48 @@ print()
 print(SEP)
 print("INSPECTION COMPLETE")
 print(SEP)
+
+# ── 9. FUSED WINDOW ALIGNMENT CHECK ─────────────────────────────────────────
+print()
+print(SEP)
+print("9. FUSED WINDOW ALIGNMENT CHECK (multi-sensor consistency)")
+print(SEP)
+
+# Only run this check if the number of channels suggests a fused dataset (e.g., >8 channels)
+if X.shape[2] > 8 and X.shape[2] % 8 == 0:
+    n_pos = X.shape[2] // 8
+    print(f"   Detected {n_pos} fused sensor positions (channels: {X.shape[2]})")
+    # For a few random samples, print per-position stats
+    rng = np.random.default_rng(123)
+    sample_idx = rng.choice(X.shape[0], size=min(5, X.shape[0]), replace=False)
+    for idx in sample_idx:
+        print(f"\n   Sample idx {idx}  (group={gr[idx]}, label={y[idx]})")
+        for pos in range(n_pos):
+            ch_start = pos * 8
+            ch_end = (pos + 1) * 8
+            window = X[idx, :, ch_start:ch_end]
+            # Print min/max timestamp if available, else just stats
+            print(f"     Position {pos+1}: mean={window.mean():.3f} std={window.std():.3f} min={window.min():.3f} max={window.max():.3f}")
+    # Check that all windows for a group have the same count
+    group_counts = {}
+    for g in np.unique(gr):
+        group_counts[g] = (gr == g).sum()
+    print("\n   Fused window count per group:")
+    for g in sorted(group_counts):
+        print(f"     Group {g}: {group_counts[g]} windows")
+    # Optionally, check for identical windows across positions (should not happen)
+    identical_cross_pos = 0
+    for idx in range(X.shape[0]):
+        base = X[idx, :, 0:8]
+        for pos in range(1, n_pos):
+            comp = X[idx, :, pos*8:(pos+1)*8]
+            if np.allclose(base, comp):
+                identical_cross_pos += 1
+    if identical_cross_pos > 0:
+        print(f"\n   WARNING: {identical_cross_pos} fused windows have identical data across positions (possible error in fusion)")
+    else:
+        print("\n   No fused windows are exactly identical across positions (OK)")
+else:
+    print("   (Not a fused dataset or only one position; skipping alignment check.)")
+
+print()

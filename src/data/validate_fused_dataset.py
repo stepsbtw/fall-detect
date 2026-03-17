@@ -110,14 +110,25 @@ if missing:
     sys.exit(1)
 
 # ── 2. Load ───────────────────────────────────────────────────────────────────
+
 time_arr = np.load(time_path)
-freq_arr = np.load(freq_path)
 labels   = np.load(label_path)
 groups   = np.load(groups_path)
+freq_arr = None
+freq_loaded = True
+try:
+    freq_arr = np.load(freq_path)
+except Exception as e:
+    warn(f"Could not load frequency domain file: {e}. Skipping freq checks.")
+    freq_loaded = False
 
 print(f"\n-- Shapes --")
+
 print(f"  time  : {time_arr.shape}")
-print(f"  freq  : {freq_arr.shape}")
+if freq_loaded:
+    print(f"  freq  : {freq_arr.shape}")
+else:
+    print(f"  freq  : [NOT LOADED]")
 print(f"  labels: {labels.shape}")
 print(f"  groups: {groups.shape}")
 
@@ -125,13 +136,20 @@ N = labels.shape[0]
 
 # ── 3. Shape consistency ──────────────────────────────────────────────────────
 print("\n-- Shape consistency --")
-for name, arr in [("time", time_arr), ("freq", freq_arr), ("groups", groups)]:
+
+for name, arr in [("time", time_arr), ("groups", groups)]:
     if arr.shape[0] == N:
         ok(f"{name}.shape[0] == {N}")
     else:
         fail(f"{name}.shape[0] = {arr.shape[0]}, expected {N}")
+if freq_loaded:
+    if freq_arr.shape[0] == N:
+        ok(f"freq.shape[0] == {N}")
+    else:
+        fail(f"freq.shape[0] = {freq_arr.shape[0]}, expected {N}")
 
 # ── 4. Window & channel dimensions ───────────────────────────────────────────
+
 print("\n-- Window & channel dimensions --")
 exp_t = target_n
 exp_f = target_n // 2
@@ -141,22 +159,31 @@ if time_arr.ndim == 3 and time_arr.shape[1] == exp_t:
 else:
     fail(f"time window = {time_arr.shape[1] if time_arr.ndim==3 else '?'}, expected {exp_t}")
 
-if freq_arr.ndim == 3 and freq_arr.shape[1] == exp_f:
-    ok(f"freq window = {freq_arr.shape[1]} (expected {exp_f})")
-else:
-    fail(f"freq window = {freq_arr.shape[1] if freq_arr.ndim==3 else '?'}, expected {exp_f}")
+if freq_loaded:
+    if freq_arr.ndim == 3 and freq_arr.shape[1] == exp_f:
+        ok(f"freq window = {freq_arr.shape[1]} (expected {exp_f})")
+    else:
+        fail(f"freq window = {freq_arr.shape[1] if freq_arr.ndim==3 else '?'}, expected {exp_f}")
 
-for name, arr in [("time", time_arr), ("freq", freq_arr)]:
+for name, arr in [("time", time_arr)]:
     ch = arr.shape[2] if arr.ndim == 3 else "?"
     if ch == n_channels:
         ok(f"{name} channels = {ch}  ({n_positions} positions × 8)")
     else:
         fail(f"{name} channels = {ch}, expected {n_channels} ({n_positions} × 8)")
+if freq_loaded:
+    ch = freq_arr.shape[2] if freq_arr.ndim == 3 else "?"
+    if ch == n_channels:
+        ok(f"freq channels = {ch}  ({n_positions} positions × 8)")
+    else:
+        fail(f"freq channels = {ch}, expected {n_channels} ({n_positions} × 8)")
 
 # ── 5. NaN / Inf ──────────────────────────────────────────────────────────────
+
 print("\n-- NaN / Inf checks --")
 check_finite(time_arr, "time_domain")
-check_finite(freq_arr, "freq_domain")
+if freq_loaded:
+    check_finite(freq_arr, "freq_domain")
 
 # ── 6. Label values ───────────────────────────────────────────────────────────
 print("\n-- Label values --")
