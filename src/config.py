@@ -5,8 +5,10 @@ import numpy as np
 class Config:
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     TORCH_BACKENDS = {
-        'cudnn_deterministic': False,
-        'cudnn_benchmark': True,
+        'cudnn_deterministic': True,
+        'cudnn_benchmark': False,
+        # 'cudnn_deterministic': False,
+        # 'cudnn_benchmark': True,
         'cuda_matmul_allow_tf32': True,
         'cudnn_allow_tf32': True
     }
@@ -20,7 +22,8 @@ class Config:
 
     # [directory_name, filename, (seq_len, num_features)]
     SCENARIOS = {
-        "chest_T":            ["chest",            "data_time_domain.npy",      (1100, 8)],
+        #"old_chest_T":            ["chest",            "data_time_domain.npy",      (1100, 8)],
+        "chest_T":            ["chest",            "data_time_domain.npy",      (460,  8)],
         # "chest_F":            ["chest",            "data_frequency_domain.npy", (550,  8)],
         "left_T":             ["left",             "data_time_domain.npy",      (460,  8)],
         # "left_F":             ["left",             "data_frequency_domain.npy", (230,  8)],
@@ -30,7 +33,7 @@ class Config:
         # "chest_left_F":       ["chest_left",       "data_frequency_domain.npy", (230, 16)],
         "chest_right_T":      ["chest_right",      "data_time_domain.npy",      (460, 16)],
         # "chest_right_F":      ["chest_right",      "data_frequency_domain.npy", (230, 16)],
-        # "chest_left_right_T": ["chest_left_right", "data_time_domain.npy",      (460, 24)],
+        "chest_left_right_T": ["chest_left_right", "data_time_domain.npy",      (460, 24)],
         # "chest_left_right_F": ["chest_left_right", "data_frequency_domain.npy", (230, 24)],
     }
 
@@ -49,16 +52,14 @@ class Config:
         'shuffle': True,
     }
 
+    FINAL_TRAINING = {
+        'seed_offset': 0,
+    }
+
     OPTIMIZER_CONFIG = {
         'name': 'Adam',
         'lr_range': (1e-4, 1e-2),
         'lr_log': True
-    }
-
-    CV_CONFIG = {
-        'n_splits': 5,   # only used as fallback; LOGO ignores this
-        'shuffle': True,
-        'random_state': 42,
     }
 
     MODEL_CONFIGS = {
@@ -74,6 +75,10 @@ class Config:
             'dense_neurons_range': (32, 512),
         },
         'LSTM': {
+            'num_layers_range': (1,  3),
+            'hidden_dim_range': (32, 256),
+        },
+        'GRU': {
             'num_layers_range': (1,  3),
             'hidden_dim_range': (32, 256),
         },
@@ -109,24 +114,12 @@ class Config:
     }
     
     N_INDIVIDUALS = 15       # total number of subjects in the dataset
-    # N_TEST_INDIVIDUALS = 3   # subjects held out as the final test set (last N by group ID)
-    #                          # 3/15 = 20 % at the subject level — enough diversity for a
-    #                          # reliable test estimate while leaving 12 for LOGO (12 folds,
-    #                          # each training on 11 subjects)
-    
-    FINAL_TRAINING = {
-        'num_models': 30,
-        'seed_offset': 42
-    }
 
     LEARNING_CURVE_CONFIG = {
         'fractions': [0.1, 0.2, 0.4, 0.6, 0.8, 1.0],
         'epochs': 10
     }
 
-    # Default hyperparameters used when skipping Optuna search.
-    # Values sit near the centre of each search range and are reasonable
-    # starting points for all scenarios.
     DEFAULT_PARAMS = {
         'CNN1D': {
             'model_type':        'CNN1D',
@@ -149,6 +142,14 @@ class Config:
         },
         'LSTM': {
             'model_type':        'LSTM',
+            'learning_rate':     1e-3,
+            'dropout':           0.3,
+            'decision_threshold': 0.5,
+            'hidden_dim':        64,
+            'num_layers':        2,
+        },
+        'GRU': {
+            'model_type':        'GRU',
             'learning_rate':     1e-3,
             'dropout':           0.3,
             'decision_threshold': 0.5,
@@ -223,6 +224,7 @@ class Config:
             "CNN1D":   (seq_len, num_features),
             "MLP":     flat,
             "LSTM":    (seq_len, num_features),
+            "GRU":     (seq_len, num_features),
             # Classical models receive flattened input
             "RF":      flat,
             "SVM":     flat,
@@ -232,7 +234,7 @@ class Config:
         if model_type:
             return {model_type: full[model_type]}
         # Default (no --nn): return only neural-network shapes
-        return {k: full[k] for k in ("CNN1D", "MLP", "LSTM")}
+        return {k: full[k] for k in ("CNN1D", "MLP", "LSTM", "GRU")}
 
     @classmethod
     def get_feature_names(cls, scenario):
@@ -263,9 +265,11 @@ class Config:
         """Define seeds para reprodutibilidade"""
         if seed is None:
             seed = cls.SEED
-        
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         np.random.seed(seed)
         import random
         random.seed(seed)
+        # For deterministic DataLoader shuffling
+        cls.TORCH_GENERATOR = torch.Generator()
+        cls.TORCH_GENERATOR.manual_seed(seed)

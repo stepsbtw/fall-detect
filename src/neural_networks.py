@@ -81,3 +81,22 @@ class LSTMNet(nn.Module):
             x = x.squeeze(1)
         out, _ = self.lstm(x)
         return self.output(self.drop(out[:, -1, :]))
+
+class GRUNet(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, dropout, number_of_labels):
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0
+        )
+        self.drop = nn.Dropout(dropout)
+        self.output = nn.Linear(hidden_dim, number_of_labels)
+
+    def forward(self, x):
+        if x.dim() == 4:
+            x = x.squeeze(1)   # (batch, seq_len, features)
+        out, _ = self.gru(x)
+        return self.output(self.drop(out[:, -1, :]))

@@ -12,9 +12,10 @@ import optuna
 import optuna.visualization as vis
 from sklearn.model_selection import LeaveOneGroupOut, GroupKFold, GroupShuffleSplit
 from sklearn.metrics import f1_score
+from sklearn.preprocessing import StandardScaler
 
 from config import Config
-from training import train, create_model, _make_classical_model
+from training import train, create_model, _make_classical_model, drop_mag_channels, keep_only_mag_channels
 from test import save_results, save_results_classical, plot_loss_curve
 
 SCENARIO_CHOICES = list(Config.SCENARIOS.keys())
@@ -43,6 +44,10 @@ def objective(
     device,
     restrict_model_type=None,
     inner_cv="kfold",
+    loss_type="weighted",
+    scale=False,
+    no_mag=False,
+    only_mag=False,
 ):
     """Objective function used by Optuna for inner CV."""
     print(f"\nIniciando Trial #{trial.number}\n")
@@ -50,7 +55,7 @@ def objective(
     model_type = (
         restrict_model_type
         if restrict_model_type
-        else trial.suggest_categorical("model_type", ["CNN1D", "MLP", "LSTM"])
+        else trial.suggest_categorical("model_type", [m for m in Config.DEFAULT_PARAMS if m not in Config.CLASSICAL_MODELS])
     )
     is_classical = model_type in Config.CLASSICAL_MODELS
 
@@ -98,6 +103,18 @@ def objective(
 
         X_train, X_val = X_trainval[train_idx], X_trainval[val_idx]
         y_train, y_val = y_trainval[train_idx], y_trainval[val_idx]
+
+        if no_mag:
+            X_train = drop_mag_channels(X_train)
+            X_val = drop_mag_channels(X_val)
+        if only_mag:
+            X_train = keep_only_mag_channels(X_train)
+            X_val = keep_only_mag_channels(X_val)
+        if scale:
+            n_tr, t_steps, n_ch = X_train.shape
+            feature_scaler = StandardScaler()
+            X_train = feature_scaler.fit_transform(X_train.reshape(-1, n_ch)).reshape(n_tr, t_steps, n_ch)
+            X_val = feature_scaler.transform(X_val.reshape(-1, n_ch)).reshape(X_val.shape[0], t_steps, n_ch)
 
         y_train_flat = np.argmax(y_train, axis=1) if len(y_train.shape) > 1 else y_train
         y_val_flat = np.argmax(y_val, axis=1) if len(y_val.shape) > 1 else y_val
@@ -332,6 +349,29 @@ def objective(
                     input_shape_dict["LSTM"],
                     num_labels,
                 )
+            elif model_type == "GRU":
+                gru_config = Config.MODEL_CONFIGS["GRU"]
+                hidden_dim = trial.suggest_int(
+                    "hidden_dim",
+                    gru_config["hidden_dim_range"][0],
+                    gru_config["hidden_dim_range"][1],
+                    log=True,
+                )
+                num_layers = trial.suggest_int(
+                    "num_layers",
+                    gru_config["num_layers_range"][0],
+                    gru_config["num_layers_range"][1],
+                )
+                model = create_model(
+                    "GRU",
+                    {
+                        "hidden_dim": hidden_dim,
+                        "num_layers": num_layers,
+                        "dropout": dropout,
+                    },
+                    input_shape_dict["GRU"],
+                    num_labels,
+                )
             else:
                 raise ValueError(f"Unknown model type: {model_type}")
 
@@ -344,13 +384,17 @@ def objective(
                 print(f"Batch size ajustado para {batch_size} (batch_size * num_gpus)")
 
             optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-            class_counts = np.bincount(y_train_flat, minlength=2)
-            class_weights = len(y_train_flat) / (2 * class_counts.astype(float))
-            weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
-            criterion = torch.nn.CrossEntropyLoss(weight=weight_tensor)
+            if loss_type == "weighted":
+                class_counts = np.bincount(y_train_flat, minlength=num_labels)
+                class_counts = np.maximum(class_counts, 1)
+                class_weights = len(y_train_flat) / (num_labels * class_counts.astype(float))
+                weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+                criterion = torch.nn.CrossEntropyLoss(weight=weight_tensor)
+            else:
+                criterion = torch.nn.CrossEntropyLoss()
 
             fold_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6
+                optimizer, mode="min", factor=0.5, patience=Config.TRAINING_CONFIG.get("patience"), min_lr=1e-6
             )
 
             train_loader = DataLoader(
@@ -374,6 +418,8 @@ def objective(
                 num_workers=Config.TRAINING_CONFIG["num_workers"],
             )
 
+            scaler = torch.cuda.amp.GradScaler(enabled=getattr(device, "type", str(device)) == "cuda")
+
             y_pred, y_true, val_losses, train_losses = train(
                 model,
                 train_loader,
@@ -384,6 +430,7 @@ def objective(
                 epochs=Config.TRAINING_CONFIG["epochs"],
                 early_stopping=Config.TRAINING_CONFIG["early_stopping"],
                 patience=Config.TRAINING_CONFIG["patience"],
+                scaler=scaler,
                 trial=trial,
                 step_offset=fold_idx * Config.TRAINING_CONFIG["epochs"],
                 scheduler=fold_scheduler,
@@ -452,6 +499,8 @@ def objective(
         summary["params"].update({"num_layers": num_layers, "dense_neurons": dense_neurons})
     elif model_type == "LSTM":
         summary["params"].update({"hidden_dim": hidden_dim, "num_layers": num_layers})
+    elif model_type == "GRU":
+        summary["params"].update({"hidden_dim": hidden_dim, "num_layers": num_layers})
     elif model_type == "RF":
         summary["params"].update(
             {
@@ -499,6 +548,10 @@ def run_optuna(
     study_name,
     restrict_model_type=None,
     inner_cv="kfold",
+    loss_type="weighted",
+    scale=False,
+    no_mag=False,
+    only_mag=False,
 ):
     """Execute Optuna optimization and persist study artifacts."""
     os.makedirs(output_dir, exist_ok=True)
@@ -530,8 +583,12 @@ def run_optuna(
             device,
             restrict_model_type,
             inner_cv,
+            loss_type,
+            scale,
+            no_mag,
+            only_mag,
         ),
-        n_trials=Config.OPTUNA_CONFIG["n_trials"],
+        n_trials=(n_trials if n_trials is not None else Config.OPTUNA_CONFIG["n_trials"]),
         n_jobs=Config.OPTUNA_CONFIG["n_jobs"],
     )
 
@@ -560,8 +617,19 @@ def run_nested_logo(args):
     n_trials = args.n_trials
     epochs = args.epochs
     inner_cv = args.inner
+    loss_type = getattr(args, "loss", "weighted")
+    scale = getattr(args, "scale", False)
+    no_mag = getattr(args, "no_mag", False)
+    only_mag = getattr(args, "only_mag", False)
 
-    base_out = os.path.join(Config.get_output_dir(model_type_arg, scenario), "nested")
+    scenario_out = scenario if loss_type == "weighted" else scenario + "_NW"
+    if scale:
+        scenario_out = f"{scenario_out}_SC"
+    if no_mag:
+        scenario_out = f"{scenario_out}_NM"
+    if only_mag:
+        scenario_out = f"{scenario_out}_OM"
+    base_out = os.path.join(Config.get_output_dir(model_type_arg, scenario_out), "nested")
     os.makedirs(base_out, exist_ok=True)
 
     X = np.load(Config.get_data_file(scenario))
@@ -571,6 +639,7 @@ def run_nested_logo(args):
     print(f"\nNested LOGO  |  scenario={scenario}  model={model_type_arg or 'auto'}")
     print(f"Subjects: {sorted(np.unique(groups).tolist())}  ({len(np.unique(groups))} total)")
     print(f"Inner n_trials per fold: {n_trials}")
+    print(f"Loss: {loss_type} | scale={scale} | no_mag={no_mag} | only_mag={only_mag}")
 
     input_shape_dict = Config.get_input_shape_dict(scenario, model_type_arg)
     logo_outer = LeaveOneGroupOut()
@@ -589,10 +658,16 @@ def run_nested_logo(args):
         X_test_fold = X[test_idx]
         y_test_fold = y[test_idx]
 
+        if no_mag:
+            X_inner = drop_mag_channels(X_inner)
+            X_test_fold = drop_mag_channels(X_test_fold)
+        if only_mag:
+            X_inner = keep_only_mag_channels(X_inner)
+            X_test_fold = keep_only_mag_channels(X_test_fold)
+
         fold_dir = os.path.join(base_out, f"outer_s{left_out}")
         os.makedirs(fold_dir, exist_ok=True)
 
-        Config.OPTUNA_CONFIG["n_trials"] = n_trials
         study_name = (
             f"{scenario}_{model_type_arg}_outer_s{left_out}"
             if model_type_arg
@@ -609,6 +684,11 @@ def run_nested_logo(args):
             restrict_model_type=model_type_arg,
             study_name=study_name,
             inner_cv=inner_cv,
+            loss_type=loss_type,
+            n_trials=n_trials,
+            scale=scale,
+            no_mag=no_mag,
+            only_mag=only_mag,
         )
 
         best_params = study.best_params
@@ -640,8 +720,15 @@ def run_nested_logo(args):
         _print_best_params(model_type, study.best_value, best_params)
 
         if model_type in Config.CLASSICAL_MODELS:
-            X_tr_flat = X_inner.reshape(len(X_inner), -1)
-            X_te_flat = X_test_fold.reshape(len(X_test_fold), -1)
+            X_inner_fit = X_inner
+            X_test_eval = X_test_fold
+            if scale:
+                n_in, t_steps, n_ch = X_inner.shape
+                feature_scaler = StandardScaler()
+                X_inner_fit = feature_scaler.fit_transform(X_inner.reshape(-1, n_ch)).reshape(n_in, t_steps, n_ch)
+                X_test_eval = feature_scaler.transform(X_test_fold.reshape(-1, n_ch)).reshape(X_test_fold.shape[0], t_steps, n_ch)
+            X_tr_flat = X_inner_fit.reshape(len(X_inner_fit), -1)
+            X_te_flat = X_test_eval.reshape(len(X_test_eval), -1)
             clf = _make_classical_model(model_type, best_params, y_inner)
             clf.fit(X_tr_flat, y_inner)
             save_results_classical(
@@ -663,38 +750,64 @@ def run_nested_logo(args):
             X_vl = X_inner[val_mask]
             y_vl = y_inner[val_mask]
 
+            if scale:
+                n_tr, t_steps, n_ch = X_tr.shape
+                feature_scaler = StandardScaler()
+                X_tr = feature_scaler.fit_transform(X_tr.reshape(-1, n_ch)).reshape(n_tr, t_steps, n_ch)
+                X_vl = feature_scaler.transform(X_vl.reshape(-1, n_ch)).reshape(X_vl.shape[0], t_steps, n_ch)
+                X_test_fold = feature_scaler.transform(X_test_fold.reshape(-1, n_ch)).reshape(X_test_fold.shape[0], t_steps, n_ch)
+
             model = create_model(model_type, best_params, input_shape, Config.NUM_LABELS)
             model.to(Config.DEVICE)
+
+            effective_batch_size = batch_size
+            if torch.cuda.device_count() > 1 and Config.DEVICE.type == "cuda":
+                print(f"Usando {torch.cuda.device_count()} GPUs com DataParallel")
+                model = torch.nn.DataParallel(model)
+                effective_batch_size = batch_size * torch.cuda.device_count()
+                print(f"Batch size ajustado para {effective_batch_size} (batch_size * num_gpus)")
 
             optimizer = torch.optim.Adam(
                 model.parameters(), lr=best_params["learning_rate"], weight_decay=1e-4
             )
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode="min", factor=0.5, patience=10, min_lr=1e-6
+                optimizer, mode="min", factor=0.5, patience=Config.TRAINING_CONFIG.get("patience"), min_lr=1e-6
             )
-            class_counts = np.bincount(y_tr, minlength=Config.NUM_LABELS)
-            class_weights = len(y_tr) / (Config.NUM_LABELS * class_counts.astype(float))
-            weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(Config.DEVICE)
-            criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+            if loss_type == "weighted":
+                class_counts = np.bincount(y_tr, minlength=Config.NUM_LABELS)
+                class_counts = np.maximum(class_counts, 1)
+                class_weights = len(y_tr) / (Config.NUM_LABELS * class_counts.astype(float))
+                weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(Config.DEVICE)
+                criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+            else:
+                criterion = nn.CrossEntropyLoss()
 
             train_loader = DataLoader(
                 TensorDataset(torch.tensor(X_tr, dtype=torch.float32), torch.tensor(y_tr, dtype=torch.long)),
-                batch_size=batch_size,
-                shuffle=True,
+                batch_size=effective_batch_size,
+                shuffle=Config.TRAINING_CONFIG["shuffle"],
+                pin_memory=Config.TRAINING_CONFIG["pin_memory"],
+                num_workers=Config.TRAINING_CONFIG["num_workers"],
             )
             val_loader = DataLoader(
                 TensorDataset(torch.tensor(X_vl, dtype=torch.float32), torch.tensor(y_vl, dtype=torch.long)),
-                batch_size=batch_size,
+                batch_size=effective_batch_size,
                 shuffle=False,
+                pin_memory=Config.TRAINING_CONFIG["pin_memory"],
+                num_workers=Config.TRAINING_CONFIG["num_workers"],
             )
             test_loader = DataLoader(
                 TensorDataset(
                     torch.tensor(X_test_fold, dtype=torch.float32),
                     torch.tensor(y_test_fold, dtype=torch.long),
                 ),
-                batch_size=batch_size,
+                batch_size=effective_batch_size,
                 shuffle=False,
+                pin_memory=Config.TRAINING_CONFIG["pin_memory"],
+                num_workers=Config.TRAINING_CONFIG["num_workers"],
             )
+
+            scaler = torch.cuda.amp.GradScaler(enabled=Config.DEVICE.type == "cuda")
 
             fold_label = f"outer_s{left_out}"
             _, _, val_losses, train_losses = train(
@@ -707,7 +820,7 @@ def run_nested_logo(args):
                 epochs=epochs,
                 early_stopping=True,
                 patience=Config.TRAINING_CONFIG["patience"],
-                scaler=None,
+                scaler=scaler,
                 scheduler=scheduler,
             )
 
@@ -744,18 +857,46 @@ def build_parser():
     parser.add_argument(
         "--model",
         required=False,
-        choices=["CNN1D", "MLP", "LSTM", "RF", "SVM", "XGBoost", "CatBoost"],
+        choices=list(Config.DEFAULT_PARAMS.keys()),
     )
     parser.add_argument("--n_trials", type=int, default=Config.OPTUNA_CONFIG["n_trials"])
     parser.add_argument("--epochs", type=int, default=Config.TRAINING_CONFIG["epochs"])
     parser.add_argument("--inner", choices=["kfold", "holdout", "none"], default="kfold")
+    parser.add_argument(
+        "--scale",
+        action="store_true",
+        default=False,
+        help="Fit a StandardScaler on each training split and apply it to validation/test splits.",
+    )
+    parser.add_argument(
+        "--no-mag",
+        dest="no_mag",
+        action="store_true",
+        default=False,
+        help="Drop the engineered magnitude channels before nested training.",
+    )
+    parser.add_argument(
+        "--only-mag",
+        dest="only_mag",
+        action="store_true",
+        default=False,
+        help="Keep only the engineered magnitude channels before nested training.",
+    )
+    parser.add_argument(
+        "--loss",
+        choices=["weighted", "unweighted"],
+        default="weighted",
+        help="Loss weighting for neural models: 'weighted' uses inverse-frequency class weights; 'unweighted' uses plain CrossEntropyLoss.",
+    )
     return parser
 
 
 def main():
     Config.setup_device()
     Config.set_seed()
-    args = build_parser().parse_args()
+
+    parser = build_parser()
+    args = parser.parse_args()
     run_nested_logo(args)
 
 

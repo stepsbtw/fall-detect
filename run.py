@@ -13,7 +13,7 @@ Modes (combinable; default is --train):
     --analyze    Aggregate per-fold metrics then run global analysis for all completed combos
 
 Filters (optional):
-    --model <MODEL>        One of: CNN1D MLP LSTM RF SVM XGBoost CatBoost
+    --model <MODEL>        One of: CNN1D MLP LSTM GRU RF SVM XGBoost CatBoost
     --scenario <SCENARIO>  e.g. chest_T, left_T ...
 
 Evaluation strategies
@@ -38,7 +38,7 @@ Examples:
     python run.py --train --model CNN1D --scenario chest_T     # train one combo
     python run.py --nested --model CNN1D --n_trials 15         # nested, CNN1D, 15 inner trials
     python run.py --nested --inner holdout                     # nested, holdout inner CV
-    python run.py --nested --model LSTM --n_trials 50 --epochs 300
+    python run.py --nested --model GRU --n_trials 50 --epochs 300
     python run.py --analyze                                    # aggregate + global analysis
     python run.py --train --analyze                            # train all then aggregate + analyze
     python run.py --analyze --model CNN1D                      # aggregate + analyze for CNN1D only
@@ -54,10 +54,15 @@ import numpy as np
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-SRC_DIR    = SCRIPT_DIR / "src"
+SRC_DIR = SCRIPT_DIR / "src"
+if not SRC_DIR.exists():
+    SRC_DIR = SCRIPT_DIR
 
 sys.path.insert(0, str(SRC_DIR))
 from config import Config
+
+# Add cross-sensor eval support
+from test import run_cross_sensor_eval
 
 # ---------------------------------------------------------------------------
 # Defaults — derived from Config so there is a single source of truth
@@ -121,7 +126,7 @@ def is_train_done(
     """Return True if every LOGO fold for this combo has a completed metrics file."""
     scenario_out = _train_scenario_out(model, scenario, loss, inner_val_groups, scale, no_mag, only_mag)
     output_dir = SCRIPT_DIR / "output" / model / scenario_out
-    done = list(output_dir.glob("fold_s*/metrics_model_s*.csv"))
+    done = list(output_dir.glob("fold_s*/metrics.csv"))
     return len(done) >= _expected_folds(scenario)
 
 
@@ -191,8 +196,21 @@ def run_train(
     print(f"    done.")
 
 
-def run_nested(model: str, scenario: str, n_trials: int, epochs: int, inner: str) -> None:
-    print(f">>  nested  model={model}  scenario={scenario}  n_trials={n_trials}  inner={inner}")
+def run_nested(
+    model: str,
+    scenario: str,
+    n_trials: int,
+    epochs: int,
+    inner: str,
+    loss: str = "weighted",
+    scale: bool = False,
+    no_mag: bool = False,
+    only_mag: bool = False,
+) -> None:
+    print(
+        f">>  nested  model={model}  scenario={scenario}  n_trials={n_trials}  "
+        f"inner={inner}  loss={loss}  scale={scale}  no_mag={no_mag}  only_mag={only_mag}"
+    )
     cmd = [
         sys.executable,
         "-u",
@@ -205,9 +223,17 @@ def run_nested(model: str, scenario: str, n_trials: int, epochs: int, inner: str
         str(n_trials),
         "--inner",
         inner,
+        "--loss",
+        loss,
     ]
     if not is_classical(model):
         cmd += ["--epochs", str(epochs)]
+    if scale:
+        cmd += ["--scale"]
+    if no_mag:
+        cmd += ["--no-mag"]
+    if only_mag:
+        cmd += ["--only-mag"]
     run_command(cmd)
     print(f"    done.")
 
@@ -224,8 +250,8 @@ def run_aggregate(model: str, scenario_out: str) -> None:
 def run_analyze(output_dir: str = "output/analysis") -> None:
     print(f">>  analyze  output_dir={output_dir}")
     cmd = [sys.executable, "-u", "analysis.py", "analyze",
-           "--base_dir", "../output",
-           "--output_dir", f"../{output_dir}"]
+           "--base_dir", str(SCRIPT_DIR / "output"),
+           "--output_dir", str(SCRIPT_DIR / output_dir)]
     run_command(cmd)
     print(f"    done.")
 
@@ -233,7 +259,7 @@ def run_analyze(output_dir: str = "output/analysis") -> None:
 def is_global_analysis_done(output_dir: str = "output/analysis") -> bool:
     """Return True when global analysis artifacts already exist."""
     analysis_root = SCRIPT_DIR / output_dir
-    return (analysis_root / "summary_final_models.csv").exists()
+    return (analysis_root / "csv" / "summary_final_models.csv").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +271,8 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    parser.add_argument("--cross_sensor", action="store_true", help="Run cross-sensor evaluation after training")
+    parser.add_argument("--train_scenario", type=str, help="Training scenario for cross-sensor eval (deprecated; --scenario also works)")
     parser.add_argument("--train",      action="store_true", help="Outer LOGO eval with default HPs — no search, zero leakage")
     parser.add_argument("--nested",     action="store_true", help="Nested LOGO (outer LOGO / inner Optuna per fold)")
     parser.add_argument("--analyze",    action="store_true", help="Aggregate per-fold metrics then run global analysis for all completed combos")
@@ -299,6 +327,21 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 def main() -> None:
     args = parse_args()
+    if args.cross_sensor:
+        train_scenario = args.train_scenario or args.scenario
+        if not (train_scenario and args.model):
+            print("--model and one of --scenario/--train_scenario are required for cross-sensor eval.")
+            return
+        run_cross_sensor_eval(
+            train_scenario,
+            args.model,
+            loss_type=args.loss,
+            epochs=args.epochs,
+            scale=args.scale,
+            no_mag=args.no_mag,
+            only_mag=args.only_mag,
+        )
+        return
 
     # Default: train only (unless --analyze is the sole flag)
     if not args.train and not args.nested and not args.analyze:
@@ -330,6 +373,10 @@ def main() -> None:
     if args.nested:
         print(f"  n_trials  : {args.n_trials} (inner, per outer fold) | epochs: {args.epochs} (NN only)")
         print(f"  inner     : {args.inner}")
+        print(f"  loss      : {args.loss} (NN only)")
+        print(f"  scale     : {args.scale}")
+        print(f"  no_mag    : {args.no_mag}")
+        print(f"  only_mag  : {args.only_mag}")
     print("=" * 56)
     print()
 
@@ -360,7 +407,17 @@ def main() -> None:
                     )
 
             if args.nested:
-                run_nested(model, scenario, args.n_trials, args.epochs, args.inner)
+                run_nested(
+                    model,
+                    scenario,
+                    args.n_trials,
+                    args.epochs,
+                    args.inner,
+                    args.loss,
+                    args.scale,
+                    args.no_mag,
+                    args.only_mag,
+                )
 
             print()
 

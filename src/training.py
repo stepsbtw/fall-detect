@@ -20,7 +20,7 @@ except ImportError:
 
 import optuna
 
-from neural_networks import CNN1DNet, MLPNet, LSTMNet
+from neural_networks import CNN1DNet, MLPNet, LSTMNet, GRUNet
 from config import Config
 from test import save_results, save_results_classical, plot_loss_curve
 
@@ -32,9 +32,9 @@ def train(
     optimizer,
     criterion,
     device,
-    epochs=25,
+    epochs=Config.TRAINING_CONFIG.get("epochs"),
     early_stopping=False,
-    patience=5,
+    patience=Config.TRAINING_CONFIG.get("patience"),
     scaler=None,
     trial=None,
     step_offset=0,
@@ -56,10 +56,11 @@ def train(
         for xb, yb in train_loader:
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
-            if scaler is not None:
-                with torch.amp.autocast("cuda"):
+            amp_enabled = scaler is not None and getattr(device, "type", str(device)) == "cuda"
+            if amp_enabled:
+                with torch.amp.autocast(device_type="cuda"):
                     out = model(xb)
                     loss = criterion(out, yb)
                 scaler.scale(loss).backward()
@@ -82,8 +83,9 @@ def train(
             for xb, yb in val_loader:
                 xb = xb.to(device, non_blocking=True)
                 yb = yb.to(device, non_blocking=True)
-                if scaler is not None:
-                    with torch.amp.autocast("cuda"):
+                amp_enabled = scaler is not None and getattr(device, "type", str(device)) == "cuda"
+                if amp_enabled:
+                    with torch.amp.autocast(device_type="cuda"):
                         out = model(xb)
                         loss = criterion(out, yb)
                 else:
@@ -163,24 +165,34 @@ def create_model(model_type, best_params, input_shape, num_labels):
             dropout=best_params["dropout"],
             number_of_labels=num_labels,
         )
+    if model_type == "GRU":
+        return GRUNet(
+            input_dim=input_shape[1],
+            hidden_dim=best_params["hidden_dim"],
+            num_layers=best_params["num_layers"],
+            dropout=best_params["dropout"],
+            number_of_labels=num_labels,
+        )
     raise ValueError(f"Tipo de modelo nao suportado: {model_type}")
 
 
 def _make_classical_model(model_type, params, y_train):
     """Instantiate a classical model from a parameter dict."""
     if model_type == "RF":
+        defaults = Config.DEFAULT_PARAMS["RF"]
         return RandomForestClassifier(
-            n_estimators=int(params.get("n_estimators", 200)),
-            max_depth=int(params.get("max_depth", 10)),
-            min_samples_split=int(params.get("min_samples_split", 5)),
+            n_estimators=int(params.get("n_estimators", defaults["n_estimators"])),
+            max_depth=int(params.get("max_depth", defaults["max_depth"])),
+            min_samples_split=int(params.get("min_samples_split", defaults["min_samples_split"])),
             class_weight="balanced",
             random_state=Config.SEED,
             n_jobs=-1,
         )
     if model_type == "SVM":
+        defaults = Config.DEFAULT_PARAMS["SVM"]
         return CalibratedClassifierCV(
             LinearSVC(
-                C=float(params.get("C", 1.0)),
+                C=float(params.get("C", defaults["C"])),
                 class_weight="balanced",
                 dual="auto",
                 max_iter=2000,
@@ -190,19 +202,21 @@ def _make_classical_model(model_type, params, y_train):
             method="sigmoid",
         )
     if model_type == "XGBoost":
+        defaults = Config.DEFAULT_PARAMS["XGBoost"]
         scale_pos_weight = int((y_train == 0).sum()) / max(int((y_train == 1).sum()), 1)
         return XGBClassifier(
-            n_estimators=int(params.get("n_estimators", 200)),
-            max_depth=int(params.get("max_depth", 5)),
-            learning_rate=float(params.get("learning_rate", 0.1)),
-            subsample=float(params.get("subsample", 0.8)),
-            colsample_bytree=float(params.get("colsample_bytree", 0.8)),
+            n_estimators=int(params.get("n_estimators", defaults["n_estimators"])),
+            max_depth=int(params.get("max_depth", defaults["max_depth"])),
+            learning_rate=float(params.get("learning_rate", defaults["learning_rate"])),
+            subsample=float(params.get("subsample", defaults["subsample"])),
+            colsample_bytree=float(params.get("colsample_bytree", defaults["colsample_bytree"])),
             scale_pos_weight=scale_pos_weight,
             eval_metric="logloss",
             random_state=Config.SEED,
             n_jobs=-1,
         )
     if model_type == "CatBoost":
+        defaults = Config.DEFAULT_PARAMS["CatBoost"]
         if CatBoostClassifier is None:
             raise ImportError("CatBoost nao esta instalado. Instale com: pip install catboost")
         class_weights = [
@@ -210,10 +224,10 @@ def _make_classical_model(model_type, params, y_train):
             max(float((y_train == 0).sum()) / max(float((y_train == 1).sum()), 1.0), 1.0),
         ]
         return CatBoostClassifier(
-            iterations=int(params.get("n_estimators", 200)),
-            depth=int(params.get("depth", 6)),
-            learning_rate=float(params.get("learning_rate", 0.1)),
-            l2_leaf_reg=float(params.get("l2_leaf_reg", 3.0)),
+            iterations=int(params.get("n_estimators", defaults["n_estimators"])),
+            depth=int(params.get("depth", defaults["depth"])),
+            learning_rate=float(params.get("learning_rate", defaults["learning_rate"])),
+            l2_leaf_reg=float(params.get("l2_leaf_reg", defaults["l2_leaf_reg"])),
             class_weights=class_weights,
             loss_function="Logloss",
             eval_metric="F1",
@@ -238,6 +252,7 @@ def drop_mag_channels(X):
       16-ch -> 12-ch (drop [0,4,8,12])
       24-ch -> 18-ch (drop [0,4,8,12,16,20])
     """
+    # ...existing code...
     C = X.shape[2]
     n_sensors = C // 8
     mag_cols = {s * 8 + offset for s in range(n_sensors) for offset in (0, 4)}
@@ -322,28 +337,51 @@ def run_final_training(args):
     threshold = best_params.get("decision_threshold", 0.5)
 
     if model_type in Config.CLASSICAL_MODELS:
-        Config.set_seed(Config.FINAL_TRAINING["seed_offset"])
         for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
             left_out = groups[test_idx[0]]
             fold_dir = os.path.join(base_out, f"fold_s{left_out}")
             model_fold_dir = os.path.join(Config.get_models_dir(model_type_arg, scenario_out), f"fold_s{left_out}")
             fold_label = f"s{left_out}"
-            done_marker = os.path.join(fold_dir, f"metrics_model_{fold_label}.csv")
+            done_marker = os.path.join(fold_dir, "metrics.csv")
             if os.path.exists(done_marker):
                 print(f"  Fold s{left_out} ja concluido - pulando.")
                 continue
             print(f"  Fold {fold_idx + 1}/{n_folds} - sujeito de teste: {left_out}")
             os.makedirs(fold_dir, exist_ok=True)
-            X_tr = X[train_idx].reshape(len(train_idx), -1)
-            y_tr = y[train_idx]
+            # Use same training split as neural networks (exclude inner validation subjects)
+            X_train_all = X[train_idx]
+            y_train_all = y[train_idx]
+            groups_train = groups[train_idx]
+            inner_subjects = np.unique(groups_train)
+            n_val_groups = min(inner_val_groups, len(inner_subjects) - 1)
+            if n_val_groups <= 0:
+                raise ValueError(
+                    "Inner validation requires at least 2 training groups in each outer fold."
+                )
+            start_idx = fold_idx % len(inner_subjects)
+            val_subjects = [
+                inner_subjects[(start_idx + k) % len(inner_subjects)] for k in range(n_val_groups)
+            ]
+            val_mask = np.isin(groups_train, val_subjects)
+            print(f"    Validation subjects: {sorted(np.array(val_subjects).tolist())}")
+            #X_train = X_train_all[~val_mask].reshape(-1, X_train_all.shape[2])
+            
+            X_train = X_train_all[~val_mask]
+            if X_train.ndim > 2:
+                X_train = X_train.reshape(X_train.shape[0], -1)
+            y_train = y_train_all[~val_mask]
             X_te = X[test_idx].reshape(len(test_idx), -1)
             y_te = y[test_idx]
             if scale:
-                ss = StandardScaler()
-                X_tr = ss.fit_transform(X_tr)
-                X_te = ss.transform(X_te)
-            clf = _make_classical_model(model_type, best_params, y_tr)
-            clf.fit(X_tr, y_tr)
+                feature_scaler = StandardScaler()
+                X_train = feature_scaler.fit_transform(X_train)
+                X_te = feature_scaler.transform(X_te)
+            print(f"X_train shape: {X_train.shape}")
+            print(f"y_train shape: {y_train.shape}")
+            if X_train.shape[0] != y_train.shape[0]:
+                print("[ERROR] X_train and y_train have different number of samples!")
+            clf = _make_classical_model(model_type, best_params, y_train)
+            clf.fit(X_train, y_train)
             save_results_classical(
                 clf=clf,
                 X_test_flat=X_te,
@@ -365,13 +403,13 @@ def run_final_training(args):
         input_shape = _input_shape_from_data(X, model_type)
     batch_size = Config.TRAINING_CONFIG.get("batch_size", 32)
 
-    Config.set_seed(Config.FINAL_TRAINING["seed_offset"])
+    Config.set_seed(Config.SEED + Config.FINAL_TRAINING["seed_offset"])
     for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
         left_out = groups[test_idx[0]]
         fold_dir = os.path.join(base_out, f"fold_s{left_out}")
         model_fold_dir = os.path.join(Config.get_models_dir(model_type_arg, scenario_out), f"fold_s{left_out}")
         fold_label = f"s{left_out}"
-        done_marker = os.path.join(fold_dir, f"metrics_model_{fold_label}.csv")
+        done_marker = os.path.join(fold_dir, "metrics.csv")
         if os.path.exists(done_marker):
             print(f"\n  Fold s{left_out} ja concluido - pulando.")
             continue
@@ -404,19 +442,28 @@ def run_final_training(args):
 
         if scale:
             N_tr, T, C = X_train.shape
-            ss = StandardScaler()
-            X_train = ss.fit_transform(X_train.reshape(-1, C)).reshape(N_tr, T, C)
-            X_es   = ss.transform(X_es.reshape(-1, C)).reshape(X_es.shape[0], T, C)
-            X_test = ss.transform(X_test.reshape(-1, C)).reshape(X_test.shape[0], T, C)
+            feature_scaler = StandardScaler()
+            X_train = feature_scaler.fit_transform(X_train.reshape(-1, C)).reshape(N_tr, T, C)
+            X_es   = feature_scaler.transform(X_es.reshape(-1, C)).reshape(X_es.shape[0], T, C)
+            X_test = feature_scaler.transform(X_test.reshape(-1, C)).reshape(X_test.shape[0], T, C)
+
+        amp_scaler = torch.cuda.amp.GradScaler(enabled=Config.DEVICE.type == "cuda")
 
         model = create_model(model_type, best_params, input_shape, Config.NUM_LABELS)
         model.to(Config.DEVICE)
+
+        effective_batch_size = batch_size
+        if torch.cuda.device_count() > 1 and Config.DEVICE.type == "cuda":
+            print(f"Usando {torch.cuda.device_count()} GPUs com DataParallel")
+            model = torch.nn.DataParallel(model)
+            effective_batch_size = batch_size * torch.cuda.device_count()
+            print(f"Batch size ajustado para {effective_batch_size} (batch_size * num_gpus)")
 
         optimizer = torch.optim.Adam(
             model.parameters(), lr=best_params["learning_rate"], weight_decay=1e-4
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=10, min_lr=1e-6
+            optimizer, mode="min", factor=0.5, patience=Config.TRAINING_CONFIG.get("patience"), min_lr=1e-6
         )
         if loss_type == "weighted":
             class_counts = np.bincount(y_train, minlength=Config.NUM_LABELS)
@@ -433,7 +480,11 @@ def run_final_training(args):
             ),
             batch_size=batch_size,
             shuffle=True,
+            pin_memory=Config.TRAINING_CONFIG["pin_memory"],
+            num_workers=Config.TRAINING_CONFIG["num_workers"],
+            generator=getattr(Config, "TORCH_GENERATOR", None),
         )
+
         es_loader = DataLoader(
             TensorDataset(
                 torch.tensor(X_es, dtype=torch.float32),
@@ -441,7 +492,11 @@ def run_final_training(args):
             ),
             batch_size=batch_size,
             shuffle=False,
+            pin_memory=Config.TRAINING_CONFIG["pin_memory"],
+            num_workers=Config.TRAINING_CONFIG["num_workers"],
+            generator=getattr(Config, "TORCH_GENERATOR", None),
         )
+
         test_loader = DataLoader(
             TensorDataset(
                 torch.tensor(X_test, dtype=torch.float32),
@@ -449,6 +504,9 @@ def run_final_training(args):
             ),
             batch_size=batch_size,
             shuffle=False,
+            pin_memory=Config.TRAINING_CONFIG["pin_memory"],
+            num_workers=Config.TRAINING_CONFIG["num_workers"],
+            generator=getattr(Config, "TORCH_GENERATOR", None),
         )
 
         _, _, val_losses, train_losses = train(
@@ -461,7 +519,7 @@ def run_final_training(args):
             epochs=epochs,
             early_stopping=True,
             patience=Config.TRAINING_CONFIG["patience"],
-            scaler=None,
+            scaler=amp_scaler,
             scheduler=scheduler,
         )
 
@@ -488,7 +546,7 @@ def build_parser():
     parser.add_argument(
         "--model",
         required=True,
-        choices=["CNN1D", "MLP", "LSTM", "RF", "SVM", "XGBoost", "CatBoost"],
+        choices=["CNN1D", "MLP", "LSTM", "GRU", "RF", "SVM", "XGBoost", "CatBoost"],
     )
     parser.add_argument("--epochs", type=int, default=Config.TRAINING_CONFIG["epochs"])
     parser.add_argument(
@@ -532,10 +590,15 @@ def build_parser():
     return parser
 
 
+
+
+
 def main():
     Config.setup_device()
     Config.set_seed()
-    args = build_parser().parse_args()
+
+    parser = build_parser()
+    args = parser.parse_args()
     run_final_training(args)
 
 

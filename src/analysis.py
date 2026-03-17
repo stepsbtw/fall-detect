@@ -1,11 +1,10 @@
-"""
-Unified analysis/output pipeline.
+"""Unified analysis/output pipeline.
 
 Usage:
-    python analysis_pipeline.py shap           -scenario <s> --nn <m> [--background_size N] [--sample_size N]
-    python analysis_pipeline.py learning_curve -scenario <s> [--nn <m>] [--epochs N]
-    python analysis_pipeline.py aggregate      -scenario <s> --nn <m>
-    python analysis_pipeline.py analyze        [--base_dir <dir>] [--output_dir <dir>]
+    python analysis.py shap           -scenario <s> --model <m> [--background_size N] [--sample_size N]
+    python analysis.py learning_curve -scenario <s> [--model <m>] [--epochs N]
+    python analysis.py aggregate      -scenario <s> --model <m>
+    python analysis.py analyze        [--base_dir <dir>] [--output_dir <dir>]
 """
 
 import argparse
@@ -75,8 +74,20 @@ def _build_human_readable_df(df, decimals=3):
         "Accuracy": "Acc",
         "Precision": "Prec",
         "Sensitivity": "Recall",
+        "tp": "TP",
+        "fp": "FP",
+        "tn": "TN",
+        "fn": "FN",
     }
     formatted = formatted.rename(columns=rename_map)
+
+    # Reorder columns for readability if present
+    col_order = [
+        "Model", "Data", "ID", "Acc", "Prec", "Recall", "f1", "TP", "FP", "TN", "FN"
+    ]
+    existing = [c for c in col_order if c in formatted.columns]
+    rest = [c for c in formatted.columns if c not in existing]
+    formatted = formatted[existing + rest]
 
     return formatted
 
@@ -252,8 +263,10 @@ def run_learning_curve(args):
     """Generate and save the learning curve for a scenario."""
     scenario = args.scenario
     model_type_arg = args.model
+    loss_type = getattr(args, "loss", "weighted")
 
-    base_out = Config.get_output_dir(model_type_arg, scenario)
+    scenario_out = scenario if loss_type == "weighted" else scenario + "_NW"
+    base_out = Config.get_output_dir(model_type_arg, scenario_out)
 
     best_params = None
     model_type = model_type_arg
@@ -273,7 +286,7 @@ def run_learning_curve(args):
         raise ValueError("--model e obrigatorio quando best_hyperparameters.json nao existe.")
 
     if model_type in Config.CLASSICAL_MODELS:
-        raise ValueError("learning_curve suporta apenas modelos neurais: CNN1D, MLP, LSTM.")
+        raise ValueError("learning_curve suporta apenas modelos neurais: CNN1D, MLP, LSTM, GRU.")
 
     if best_params is None:
         best_params = dict(Config.DEFAULT_PARAMS[model_type])
@@ -330,6 +343,7 @@ def run_learning_curve(args):
         device=Config.DEVICE,
         output_dir=base_out,
         epochs=args.epochs,
+        loss_type=loss_type,
     )
 
 def _aggregate_model_metrics(base_out):
@@ -367,10 +381,25 @@ def _aggregate_model_metrics(base_out):
     print(f"Total de modelos processados: {len(combined_df)}")
 
     numeric_cols = [c for c in combined_df.columns if c not in ['subject_id', 'Model']]
-    summary_df = combined_df[numeric_cols].describe().loc[['mean', 'std']].copy()
-    summary_df.insert(0, 'Model', ['mean', 'std'])
-    summary_df.to_csv(os.path.join(base_out, "summary_metrics.csv"))
-    print(f"Estatísticas resumidas salvas em: {os.path.join(base_out, 'summary_metrics.csv')}")
+    # Standard metrics table
+    agg_metrics = [c for c in numeric_cols if c not in ['tp', 'fp', 'tn', 'fn']]
+    summary_stats = combined_df[agg_metrics].describe().loc[['mean', 'std']].copy()
+    summary_stats.insert(0, 'Model', ['mean', 'std'])
+    summary_stats.to_csv(os.path.join(base_out, "summary_metrics_standard.csv"), index=False)
+
+    # Confusion matrix table
+    cm_cols = ['tp', 'fp', 'tn', 'fn']
+    cm_sum = {col: combined_df[col].sum() if col in cm_cols else '' for col in combined_df.columns}
+    cm_sum['Model'] = 'TOTAL'
+    cm_sum['Total_P'] = cm_sum['tp'] + cm_sum['fp'] if cm_sum['tp'] != '' and cm_sum['fp'] != '' else ''
+    cm_sum['Total_N'] = cm_sum['tn'] + cm_sum['fn'] if cm_sum['tn'] != '' and cm_sum['fn'] != '' else ''
+    cm_sum['Total'] = sum([cm_sum[c] for c in cm_cols if cm_sum[c] != '']) if all(cm_sum[c] != '' for c in cm_cols) else ''
+    cm_df = pd.DataFrame([cm_sum])
+    cm_df = cm_df.rename(columns={"tp": "TP", "fp": "FP", "tn": "TN", "fn": "FN"})
+    cm_df = cm_df[[c for c in ["Model", "TP", "FP", "Total_P", "TN", "FN", "Total_N", "Total"] if c in cm_df.columns]]
+    cm_df.to_csv(os.path.join(base_out, "summary_metrics_confusion.csv"), index=False)
+    print(f"Estatísticas resumidas salvas em: {os.path.join(base_out, 'summary_metrics_standard.csv')} (standard)")
+    print(f"Estatísticas resumidas salvas em: {os.path.join(base_out, 'summary_metrics_confusion.csv')} (confusion matrix)")
 
     return True
 
@@ -422,18 +451,23 @@ def _analyze_final_models(df, output_dir):
         if not row["all_metrics"]:
             continue
         metrics_df = pd.read_csv(row["all_metrics"])
-        metricas_plot = [c for c in ["f1", "acc", "prec", "rec"]
-                         if c in metrics_df.columns]
+        # Always include confusion matrix columns if present
+        metricas_plot = [c for c in ["f1", "acc", "prec", "rec", "tp", "fp", "tn", "fn"] if c in metrics_df.columns]
         if not metricas_plot:
             print(f"Nenhuma métrica reconhecida em {row['all_metrics']}, pulando.")
             continue
 
-        stats = metrics_df.describe().loc[["mean", "std"]]
-        summary = {"model_type": row["model_type"],
-                   "scenario": row["scenario"]}
-        for met in metricas_plot:
+        # Only aggregate mean/std for non-confusion-matrix metrics
+        agg_metrics = [m for m in metricas_plot if m not in ["tp", "fp", "tn", "fn"]]
+        stats = metrics_df[agg_metrics].describe().loc[["mean", "std"]] if agg_metrics else pd.DataFrame()
+        summary = {"model_type": row["model_type"], "scenario": row["scenario"]}
+        for met in agg_metrics:
             summary[f"{met}_mean"] = stats.loc["mean", met]
             summary[f"{met}_std"] = stats.loc["std", met]
+        # Add sum for confusion matrix columns, label as TP, FP, TN, FN
+        for met, label in zip(["tp", "fp", "tn", "fn"], ["TP", "FP", "TN", "FN"]):
+            if met in metrics_df.columns:
+                summary[label] = metrics_df[met].sum()
         summary_rows.append(summary)
 
         subject_column = None
@@ -501,6 +535,17 @@ def _analyze_final_models(df, output_dir):
             output_root=output_dir,
         )
         print(f"Resumo do subject '{subject_id}' salvo em: {subject_csv}")
+
+    # Export global summary metrics tables (standard and confusion matrix)
+    base_out = output_dir
+    standard_csv = os.path.join(base_out, "summary_metrics_standard.csv")
+    confusion_csv = os.path.join(base_out, "summary_metrics_confusion.csv")
+    if os.path.exists(standard_csv):
+        df_standard = pd.read_csv(standard_csv)
+        _save_csv_and_txt(df_standard, standard_csv, "Global Metrics (Standard)", output_root=output_dir)
+    if os.path.exists(confusion_csv):
+        df_confusion = pd.read_csv(confusion_csv)
+        _save_csv_and_txt(df_confusion, confusion_csv, "Global Metrics (Confusion Matrix)", output_root=output_dir)
 
     return summary_df, subject_df
 
@@ -622,7 +667,7 @@ def build_parser():
 
     def add_scenario_nn(p, nn_required=False):
         p.add_argument("-scenario", required=True, choices=SCENARIO_CHOICES)
-        p.add_argument("--model", required=nn_required, choices=["CNN1D", "MLP", "LSTM", "RF", "SVM", "XGBoost", "CatBoost"])
+        p.add_argument("--model", required=nn_required, choices=list(Config.DEFAULT_PARAMS.keys()))
 
     # --- shap ---
     p_shap = subparsers.add_parser("shap", help="SHAP feature importance for the best model")
@@ -634,13 +679,19 @@ def build_parser():
     p_lc = subparsers.add_parser("learning_curve", help="Generate learning curve")
     add_scenario_nn(p_lc)
     p_lc.add_argument("--epochs", type=int, default=Config.LEARNING_CURVE_CONFIG["epochs"], help="Épocas por fração")
+    p_lc.add_argument(
+        "--loss",
+        choices=["weighted", "unweighted"],
+        default="weighted",
+        help="Loss weighting for neural learning curves: 'weighted' uses inverse-frequency class weights; 'unweighted' uses plain CrossEntropyLoss.",
+    )
 
     # --- aggregate ---
     p_agg = subparsers.add_parser("aggregate", help="Aggregate per-model metrics")
     p_agg.add_argument("-scenario", required=True,
                        help="Scenario variant name (e.g. chest_T, chest_T_IVG1_SC_NM)")
     p_agg.add_argument("--model", required=True,
-                       choices=["CNN1D", "MLP", "LSTM", "RF", "SVM", "XGBoost", "CatBoost"])
+                       choices=list(Config.DEFAULT_PARAMS.keys()))
 
     # --- analyze ---
     p_ana = subparsers.add_parser("analyze", help="Global analysis of all experiments")
