@@ -35,6 +35,7 @@ from data_training_builders import (
     fourier_transform,
     get_file_path,
     sort_by_number,
+    validate_sampling_segments,
 )
 
 # ── Activity type sets (same definition as the original pipeline) ─────────────
@@ -205,6 +206,11 @@ parser.add_argument(
     "--target-size", type=int, default=460,
     help="Common window length after resampling (default: 460)",
 )
+parser.add_argument(
+    "--strict-sampling-validation",
+    action="store_true",
+    help="Fail if sampling.csv boundaries disagree with sensor rows for any activity.",
+)
 args = parser.parse_args()
 
 positions = [p.lower() for p in args.positions]
@@ -226,6 +232,7 @@ data_time_list: list = []
 data_freq_list: list = []
 labels_list: list = []
 groups_list: list = []
+validation_reports: list = []
 
 n_channels = 8 * len(positions)
 print(f"Positions : {positions}")
@@ -247,8 +254,26 @@ for subdirectory in subdirectory_list:
             acc_file, gyr_file, samp_file = get_file_path(
                 main_directory, subdirectory, pos.upper()
             )
-            pos_data[pos] = (pd.read_csv(acc_file), pd.read_csv(gyr_file))
-            pos_rank_maps[pos] = build_rank_map(pd.read_csv(samp_file))
+            acc_df = pd.read_csv(acc_file)
+            gyr_df = pd.read_csv(gyr_file)
+            sampling_df = pd.read_csv(samp_file)
+            pos_data[pos] = (acc_df, gyr_df)
+            pos_rank_maps[pos] = build_rank_map(sampling_df)
+
+            validation_report = validate_sampling_segments(acc_df, gyr_df, sampling_df)
+            validation_report.insert(0, "group_id", group_id)
+            validation_report.insert(1, "position", pos.upper())
+            validation_reports.append(validation_report)
+
+            issue_count = int(validation_report["has_issue"].sum())
+            if issue_count:
+                print(f" VALIDATION_WARN[{pos.upper()}]={issue_count}", end="", flush=True)
+                if args.strict_sampling_validation:
+                    bad_ids = validation_report.loc[validation_report["has_issue"], "sampling_id"].tolist()
+                    raise ValueError(
+                        f"sampling validation failed for {subdirectory} / {pos.upper()}: "
+                        f"{issue_count} problematic ids {bad_ids}"
+                    )
     except FileNotFoundError as exc:
         print(f" SKIP ({exc})")
         continue
@@ -310,9 +335,33 @@ np.save(os.path.join(data_out_dir,   "data_frequency_domain.npy"),  all_freq)
 np.save(os.path.join(label_out_dir,  "labels.npy"),  np.asarray(labels_list))
 np.save(os.path.join(label_out_dir,  "groups.npy"),  np.asarray(groups_list))
 
+window_ids = [
+    f"{group_id}_{i}"
+    for i, group_id in enumerate(groups_list)
+]
+
+df_meta = pd.DataFrame({
+    "index": list(range(len(groups_list))),
+    "window_id": window_ids,
+    "group_id": groups_list,
+    "y_true": labels_list,
+})
+
+df_meta.to_csv(os.path.join(label_out_dir, "metadata.csv"), index=False)
+
+if validation_reports:
+    validation_path = os.path.join(label_out_dir, "sampling_validation_report.csv")
+    df_validation = pd.concat(validation_reports, ignore_index=True)
+    df_validation.to_csv(validation_path, index=False)
+    print(
+        f"Sampling validation report saved to {validation_path} "
+        f"({int(df_validation['has_issue'].sum())} rows with issues)."
+    )
+
 print(f"\nDone.")
 print(f"  Samples     : {len(labels_list)}")
 print(f"  Time shape  : {all_time.shape}   (N, {target_n}, {n_channels})")
 print(f"  Freq shape  : {all_freq.shape}  (N, {target_n // 2}, {n_channels})")
 print(f"  Labels      : {dict(zip(*np.unique(np.asarray(labels_list), return_counts=True)))}")
 print(f"  Output dir  : {os.path.join(output_directory, fused_name)}")
+

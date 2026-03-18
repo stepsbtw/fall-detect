@@ -135,3 +135,109 @@ def create_labels(activity):
 
 def add_labels(label, labels_list):
     labels_list.append(label)
+
+
+
+def validate_sampling_segments(
+    acc_dataframe,
+    gyr_dataframe,
+    sampling_dataframe,
+    timestamp_tolerance_ms=2500,
+    duration_tolerance_ratio=0.25,
+):
+    """
+    Validate whether each sampling id in the manifest is consistent with the
+    sensor rows assigned to that id.
+
+    Returns a dataframe with one row per sampling id and boolean issue flags.
+    This is intentionally a validator, not a slicer: the training pipeline may
+    still rely on the sensor CSVs' ``sampling`` column for extraction.
+    """
+    report_rows = []
+
+    for _, row in sampling_dataframe.iterrows():
+        sampling_id = int(row["id"])
+        expected_start = float(row["beginning"]) if "beginning" in row and pd.notna(row["beginning"]) else np.nan
+        expected_end = float(row["ending"]) if "ending" in row and pd.notna(row["ending"]) else np.nan
+        expected_duration = (
+            expected_end - expected_start
+            if not np.isnan(expected_start) and not np.isnan(expected_end)
+            else np.nan
+        )
+
+        acc_slice = acc_dataframe.loc[acc_dataframe["sampling"] == sampling_id, ["timestamp"]].copy()
+        gyr_slice = gyr_dataframe.loc[gyr_dataframe["sampling"] == sampling_id, ["timestamp"]].copy()
+
+        acc_count = int(len(acc_slice))
+        gyr_count = int(len(gyr_slice))
+
+        acc_start = float(acc_slice["timestamp"].min()) if acc_count else np.nan
+        acc_end = float(acc_slice["timestamp"].max()) if acc_count else np.nan
+        gyr_start = float(gyr_slice["timestamp"].min()) if gyr_count else np.nan
+        gyr_end = float(gyr_slice["timestamp"].max()) if gyr_count else np.nan
+
+        observed_start = np.nanmin([acc_start, gyr_start]) if (acc_count or gyr_count) else np.nan
+        observed_end = np.nanmax([acc_end, gyr_end]) if (acc_count or gyr_count) else np.nan
+        observed_duration = (
+            observed_end - observed_start
+            if not np.isnan(observed_start) and not np.isnan(observed_end)
+            else np.nan
+        )
+
+        start_gap_ms = (
+            abs(observed_start - expected_start)
+            if not np.isnan(observed_start) and not np.isnan(expected_start)
+            else np.nan
+        )
+        end_gap_ms = (
+            abs(observed_end - expected_end)
+            if not np.isnan(observed_end) and not np.isnan(expected_end)
+            else np.nan
+        )
+        duration_gap_ms = (
+            abs(observed_duration - expected_duration)
+            if not np.isnan(observed_duration) and not np.isnan(expected_duration)
+            else np.nan
+        )
+        duration_gap_ratio = (
+            duration_gap_ms / expected_duration
+            if not np.isnan(duration_gap_ms) and expected_duration not in (0, np.nan)
+            else np.nan
+        )
+
+        missing_acc = acc_count == 0
+        missing_gyr = gyr_count == 0
+        missing_any_sensor = missing_acc or missing_gyr
+        start_mismatch = bool(not np.isnan(start_gap_ms) and start_gap_ms > timestamp_tolerance_ms)
+        end_mismatch = bool(not np.isnan(end_gap_ms) and end_gap_ms > timestamp_tolerance_ms)
+        duration_mismatch = bool(
+            not np.isnan(duration_gap_ratio) and duration_gap_ratio > duration_tolerance_ratio
+        )
+        has_issue = missing_any_sensor or start_mismatch or end_mismatch or duration_mismatch
+
+        report_rows.append({
+            "sampling_id": sampling_id,
+            "exercise": row.get("exercise"),
+            "withRifle": row.get("withRifle"),
+            "expected_start": expected_start,
+            "expected_end": expected_end,
+            "expected_duration_ms": expected_duration,
+            "acc_count": acc_count,
+            "gyr_count": gyr_count,
+            "observed_start": observed_start,
+            "observed_end": observed_end,
+            "observed_duration_ms": observed_duration,
+            "start_gap_ms": start_gap_ms,
+            "end_gap_ms": end_gap_ms,
+            "duration_gap_ms": duration_gap_ms,
+            "duration_gap_ratio": duration_gap_ratio,
+            "missing_acc": missing_acc,
+            "missing_gyr": missing_gyr,
+            "missing_any_sensor": missing_any_sensor,
+            "start_mismatch": start_mismatch,
+            "end_mismatch": end_mismatch,
+            "duration_mismatch": duration_mismatch,
+            "has_issue": has_issue,
+        })
+
+    return pd.DataFrame(report_rows)
