@@ -28,6 +28,16 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import pandas as pd
+import numpy as np
+
+OUTLIER_THRESHOLD = 10000
+
+OUTLIER_SENSOR_FILES = [
+    "acceleration",
+    "angular_speed",
+]
+
+OUTLIER_SENSOR_POSITIONS = ["RIGHT", "LEFT", "CHEST"]
 
 CORRECT_YEAR = 2024
 
@@ -76,6 +86,59 @@ def resolve_raw_root(dataset_root: pathlib.Path) -> pathlib.Path:
         f"Could not find raw root. Tried: {', '.join(str(x) for x in candidates)}"
     )
 
+def _clean_outliers_in_df(df: pd.DataFrame, threshold: int) -> tuple[pd.DataFrame, int]:
+    time_cols = {"timestamp", "beginning", "ending"}
+    numeric_cols = [
+        col for col in df.select_dtypes(include=[np.number]).columns
+        if col not in time_cols
+    ]
+
+    changes = 0
+
+    for col in numeric_cols:
+        values = df[col].values
+        outlier_idx = np.where(np.abs(values) > threshold)[0]
+
+        for idx in outlier_idx:
+            if 0 < idx < len(values) - 1:
+                prev_val = values[idx - 1]
+                next_val = values[idx + 1]
+                interp = (prev_val + next_val) / 2
+                df.at[idx, col] = interp
+                changes += 1
+
+    return df, changes
+
+
+def clean_outliers(raw_root: pathlib.Path, dry_run: bool, backup: bool) -> tuple[int, int]:
+    files_changed = 0
+    values_changed = 0
+
+    for uid in iter_users(raw_root):
+        for pos in OUTLIER_SENSOR_POSITIONS:
+            base = raw_root / uid / pos
+            if not base.exists():
+                continue
+
+            for file in base.iterdir():
+                if not file.name.endswith(".csv") or file.name.endswith(".bak"):
+                    continue
+
+                if not any(sensor in file.name for sensor in OUTLIER_SENSOR_FILES):
+                    continue
+
+                df = pd.read_csv(file)
+                df, changes = _clean_outliers_in_df(df, OUTLIER_THRESHOLD)
+
+                if changes > 0:
+                    maybe_backup(file, backup, dry_run)
+                    if not dry_run:
+                        df.to_csv(file, index=False)
+                        files_changed += 1
+                    values_changed += changes
+                    print(f"  {file.name}: {changes} outlier value(s) fixed")
+
+    return files_changed, values_changed
 
 def iter_users(raw_root: pathlib.Path) -> list[str]:
     users = [p.name for p in raw_root.iterdir() if p.is_dir() and p.name.startswith("ID")]
@@ -392,6 +455,10 @@ def run_all(dataset_root: pathlib.Path, raw_root: pathlib.Path, dry_run: bool, b
     f, v = restore_truncated(raw_root, dry_run=dry_run, backup=backup)
     print(f"Summary: files_changed={f}, values_changed={v}\n")
 
+    print("== Step 5: clean outliers ==")
+    f, v = clean_outliers(raw_root, dry_run=dry_run, backup=backup)
+    print(f"Summary: files_changed={f}, values_changed={v}\n")
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Unified dataset fixes runner")
@@ -422,6 +489,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("row-level-fix", help="Apply row-level timestamp correction for known mixed-session files")
     sub.add_parser("restore-truncated", help="Restore known truncated angular_speed files from .bak and reapply offset")
     sub.add_parser("run-all", help="Execute all fixes in the expected order")
+    sub.add_parser("clean-outliers", help="Fix extreme sensor outliers via interpolation")
     return parser
 
 
@@ -477,6 +545,11 @@ def main() -> int:
 
     if args.command == "run-all":
         run_all(dataset_root, raw_root, dry_run=dry_run, backup=backup)
+        return 0
+
+    if args.command == "clean-outliers":
+        f, v = clean_outliers(raw_root, dry_run=dry_run, backup=backup)
+        print(f"Summary: files_changed={f}, values_changed={v}")
         return 0
 
     parser.print_help()
