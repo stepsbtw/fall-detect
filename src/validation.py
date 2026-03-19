@@ -122,6 +122,7 @@ def objective(
         fold_dir = os.path.join(output_dir, f"trial_{trial.number}")
         os.makedirs(fold_dir, exist_ok=True)
 
+
         if is_classical:
             X_train_flat = X_train.reshape(len(X_train), -1)
             X_val_flat = X_val.reshape(len(X_val), -1)
@@ -224,6 +225,10 @@ def objective(
                     },
                     y_train_flat,
                 )
+            elif model_type == "LogisticRegression":
+                lr_cfg = Config.MODEL_CONFIGS["LogisticRegression"]
+                C = trial.suggest_float("C", lr_cfg["C_range"][0], lr_cfg["C_range"][1], log=True)
+                clf = _make_classical_model("LogisticRegression", {"C": C}, y_train_flat)
             else:
                 raise ValueError(f"Unknown model type: {model_type}")
 
@@ -635,6 +640,8 @@ def run_nested_logo(args):
     X = np.load(Config.get_data_file(scenario))
     y = np.load(Config.get_labels_file(scenario)).astype(np.int64)
     groups = np.load(Config.get_groups_file(scenario))
+    window_ids_path = os.path.join(os.path.dirname(Config.get_labels_file(scenario)), "window_ids.npy")
+    window_ids = np.load(window_ids_path, allow_pickle=True) if os.path.exists(window_ids_path) else None
 
     print(f"\nNested LOGO  |  scenario={scenario}  model={model_type_arg or 'auto'}")
     print(f"Subjects: {sorted(np.unique(groups).tolist())}  ({len(np.unique(groups))} total)")
@@ -857,7 +864,7 @@ def build_parser():
     parser.add_argument(
         "--model",
         required=False,
-        choices=list(Config.DEFAULT_PARAMS.keys()),
+        choices=list(Config.DEFAULT_PARAMS.keys()) + ["LogisticRegression"],
     )
     parser.add_argument("--n_trials", type=int, default=Config.OPTUNA_CONFIG["n_trials"])
     parser.add_argument("--epochs", type=int, default=Config.TRAINING_CONFIG["epochs"])

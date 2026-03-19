@@ -23,6 +23,7 @@ import optuna
 from neural_networks import CNN1DNet, MLPNet, LSTMNet, GRUNet
 from config import Config
 from test import save_results, save_results_classical, plot_loss_curve
+from sensor_fusion import sensors_from_scenario, apply_sensor_dropout_batch, zero_sensor_blocks
 
 
 def train(
@@ -39,6 +40,7 @@ def train(
     trial=None,
     step_offset=0,
     scheduler=None,
+    batch_transform=None,
 ):
     """Train with optional early stopping, mixed precision and Optuna pruning."""
     model.to(device, non_blocking=True)
@@ -54,6 +56,8 @@ def train(
         train_losses = []
 
         for xb, yb in train_loader:
+            if batch_transform is not None:
+                xb = batch_transform(xb)
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
@@ -177,6 +181,7 @@ def create_model(model_type, best_params, input_shape, num_labels):
 
 
 def _make_classical_model(model_type, params, y_train):
+    from sklearn.linear_model import LogisticRegression
     """Instantiate a classical model from a parameter dict."""
     if model_type == "RF":
         defaults = Config.DEFAULT_PARAMS["RF"]
@@ -234,6 +239,15 @@ def _make_classical_model(model_type, params, y_train):
             random_seed=Config.SEED,
             verbose=False,
         )
+    if model_type == "LogisticRegression":
+        defaults = Config.DEFAULT_PARAMS["LogisticRegression"]
+        return LogisticRegression(
+            C=float(params.get("C", defaults["C"])),
+            class_weight="balanced",
+            max_iter=1000,
+            random_state=Config.SEED,
+            solver="lbfgs",
+        )
     raise ValueError(f"Unknown classical model type: {model_type}")
 
 
@@ -278,6 +292,68 @@ def keep_only_mag_channels(X):
     return X[:, :, keep_cols]
 
 
+def make_sensor_dropout_transform(scenario, p=0.5, max_off=1, allow_no_dropout=True):
+    sensors = sensors_from_scenario(scenario)
+
+    def _transform(xb):
+        x_np = xb.detach().cpu().numpy()
+        x_np, _ = apply_sensor_dropout_batch(
+            x_np,
+            sensors=sensors,
+            p=p,
+            max_off=max_off,
+            allow_no_dropout=allow_no_dropout,
+        )
+        return torch.tensor(x_np, dtype=xb.dtype)
+
+    return _transform
+
+
+def evaluate_missing_sensor_conditions(
+    model,
+    X_test,
+    y_test,
+    scenario,
+    decision_threshold,
+    fold_dir,
+    device,
+    batch_size,
+    sample_indices=None,
+    group_ids=None,
+    window_ids=None,
+):
+    sensors = sensors_from_scenario(scenario)
+    for sensor in sensors:
+        X_masked = zero_sensor_blocks(X_test, [sensor], scenario=scenario, inplace=False)
+        cond_dir = os.path.join(fold_dir, f"missing_{sensor}")
+        loader = DataLoader(
+            TensorDataset(
+                torch.tensor(X_masked, dtype=torch.float32),
+                torch.tensor(y_test, dtype=torch.long),
+            ),
+            batch_size=batch_size,
+            shuffle=False,
+            pin_memory=Config.TRAINING_CONFIG["pin_memory"],
+            num_workers=Config.TRAINING_CONFIG["num_workers"],
+            generator=getattr(Config, "TORCH_GENERATOR", None),
+        )
+        save_results(
+            model=model,
+            val_loader=loader,
+            y_val_onehot=y_test,
+            i=f"missing_{sensor}",
+            decision_threshold=decision_threshold,
+            output_dir=cond_dir,
+            device=device,
+            save_model=False,
+            sample_indices=sample_indices,
+            group_ids=group_ids,
+            window_ids=window_ids,
+            scenario_name=scenario,
+            sensor_status={"missing": [sensor], "available": [s for s in sensors if s != sensor]},
+        )
+
+
 def _input_shape_from_data(X, model_type):
     """Derive the correct input_shape for a model from the actual data array."""
     _, T, C = X.shape
@@ -292,10 +368,14 @@ def run_final_training(args):
     model_type_arg = args.model
     epochs = args.epochs
     loss_type = getattr(args, "loss", "weighted")
-    inner_val_groups = max(int(getattr(args, "inner_val_groups", 3)), 1)
+    inner_val_groups = getattr(args, "inner_val_groups")
     scale = getattr(args, "scale", False)
     no_mag = getattr(args, "no_mag", False)
     only_mag = getattr(args, "only_mag", False)
+    sensor_dropout = getattr(args, "sensor_dropout", False)
+    sensor_dropout_p = float(getattr(args, "sensor_dropout_p", 0.5))
+    sensor_dropout_max_off = int(getattr(args, "sensor_dropout_max_off", 1))
+    evaluate_missing = getattr(args, "evaluate_missing", False)
 
     if not model_type_arg:
         raise ValueError("--model e obrigatorio para o modo train.")
@@ -305,6 +385,8 @@ def run_final_training(args):
     print(f"Usando parametros padrao para {model_type}: {best_params}")
     print(f"Loss: {loss_type} class weights")
     print(f"Inner validation groups per outer fold: {inner_val_groups}")
+    if sensor_dropout:
+        print(f"Sensor dropout enabled: p={sensor_dropout_p:.3f}, max_off={sensor_dropout_max_off}")
 
     scenario_out = scenario if loss_type == "weighted" else scenario + "_NW"
     if model_type not in Config.CLASSICAL_MODELS:
@@ -315,12 +397,17 @@ def run_final_training(args):
         scenario_out = f"{scenario_out}_NM"
     if only_mag:
         scenario_out = f"{scenario_out}_OM"
+    if sensor_dropout:
+        sensor_dropout_tag = str(sensor_dropout_p).replace('.', 'p')
+        scenario_out = f"{scenario_out}_SDP{sensor_dropout_tag}_M{sensor_dropout_max_off}"
     base_out = Config.get_output_dir(model_type_arg, scenario_out)
     os.makedirs(base_out, exist_ok=True)
 
     X = np.load(Config.get_data_file(scenario))
     y = np.load(Config.get_labels_file(scenario)).astype(np.int64)
     groups = np.load(Config.get_groups_file(scenario))
+    window_ids_path = os.path.join(os.path.dirname(Config.get_labels_file(scenario)), "window_ids.npy")
+    window_ids = np.load(window_ids_path, allow_pickle=True) if os.path.exists(window_ids_path) else None
 
     if no_mag:
         X = drop_mag_channels(X)
@@ -390,6 +477,10 @@ def run_final_training(args):
                 i=fold_label,
                 output_dir=fold_dir,
                 model_output_dir=model_fold_dir,
+                sample_indices=test_idx,
+                group_ids=groups[test_idx],
+                window_ids=window_ids[test_idx] if window_ids is not None else None,
+                scenario_name=scenario,
             )
             print(f"  Fold s{left_out} concluido")
         print(f"\nLOGO concluido! Resultados em: {base_out}")
@@ -402,6 +493,14 @@ def run_final_training(args):
     if only_mag:
         input_shape = _input_shape_from_data(X, model_type)
     batch_size = Config.TRAINING_CONFIG.get("batch_size", 32)
+    batch_transform = None
+    if sensor_dropout:
+        batch_transform = make_sensor_dropout_transform(
+            scenario,
+            p=sensor_dropout_p,
+            max_off=sensor_dropout_max_off,
+            allow_no_dropout=True,
+        )
 
     Config.set_seed(Config.SEED + Config.FINAL_TRAINING["seed_offset"])
     for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
@@ -521,6 +620,7 @@ def run_final_training(args):
             patience=Config.TRAINING_CONFIG["patience"],
             scaler=amp_scaler,
             scheduler=scheduler,
+            batch_transform=batch_transform,
         )
 
         plot_loss_curve(train_losses, val_losses, fold_dir, fold_label)
@@ -534,7 +634,26 @@ def run_final_training(args):
             output_dir=fold_dir,
             device=Config.DEVICE,
             model_output_dir=model_fold_dir,
+            sample_indices=test_idx,
+            group_ids=groups[test_idx],
+            window_ids=window_ids[test_idx] if window_ids is not None else None,
+            scenario_name=scenario,
+            sensor_status={"missing": [], "available": sensors_from_scenario(scenario)},
         )
+        if evaluate_missing:
+            evaluate_missing_sensor_conditions(
+                model=model,
+                X_test=X_test,
+                y_test=y_test,
+                scenario=scenario,
+                decision_threshold=threshold,
+                fold_dir=fold_dir,
+                device=Config.DEVICE,
+                batch_size=batch_size,
+                sample_indices=test_idx,
+                group_ids=groups[test_idx],
+                window_ids=window_ids[test_idx] if window_ids is not None else None,
+            )
         print(f"  Fold s{left_out} concluido - salvo em {fold_dir}")
 
     print(f"\nLOGO concluido! Resultados em: {base_out}")
@@ -546,7 +665,7 @@ def build_parser():
     parser.add_argument(
         "--model",
         required=True,
-        choices=["CNN1D", "MLP", "LSTM", "GRU", "RF", "SVM", "XGBoost", "CatBoost"],
+        choices=["CNN1D", "MLP", "LSTM", "GRU", "RF", "SVM", "XGBoost", "CatBoost", "LogisticRegression"],
     )
     parser.add_argument("--epochs", type=int, default=Config.TRAINING_CONFIG["epochs"])
     parser.add_argument(
@@ -560,9 +679,9 @@ def build_parser():
     parser.add_argument(
         "--inner-val-groups",
         type=int,
-        default=3,
+        default=1,
         help="Number of training subjects held out for inner validation in each outer LOGO fold "
-             "(group-wise, default=3).",
+             "(group-wise, default=1).",
     )
     parser.add_argument(
         "--scale",
@@ -586,6 +705,30 @@ def build_parser():
         default=False,
         help="Keep only the engineered magnitude channels (mag_acc, mag_gyr), dropping raw axes. "
              "Results are saved to <scenario>_OM directories.",
+    )
+    parser.add_argument(
+        "--sensor-dropout",
+        action="store_true",
+        default=False,
+        help="Randomly zero out complete sensor blocks during training to simulate failures.",
+    )
+    parser.add_argument(
+        "--sensor-dropout-p",
+        type=float,
+        default=0.5,
+        help="Probability of applying sensor dropout to a training sample (default=0.5).",
+    )
+    parser.add_argument(
+        "--sensor-dropout-max-off",
+        type=int,
+        default=1,
+        help="Maximum number of sensor blocks to zero per corrupted sample.",
+    )
+    parser.add_argument(
+        "--evaluate-missing",
+        action="store_true",
+        default=False,
+        help="Also evaluate missing-one-sensor conditions in fold subdirectories.",
     )
     return parser
 

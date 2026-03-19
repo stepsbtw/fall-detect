@@ -18,11 +18,11 @@ class Config:
     NUM_LABELS = 2
 
     # Models that use sklearn/XGBoost/CatBoost instead of PyTorch
-    CLASSICAL_MODELS = frozenset({"RF", "SVM", "XGBoost", "CatBoost"})
+    CLASSICAL_MODELS = frozenset({"RF", "SVM", "XGBoost", "CatBoost", "LogisticRegression"})
 
     # [directory_name, filename, (seq_len, num_features)]
     SCENARIOS = {
-        #"old_chest_T":            ["chest",            "data_time_domain.npy",      (1100, 8)],
+        "chest_T_1100":            ["chest",            "data_time_domain.npy",      (1100, 8)],
         "chest_T":            ["chest",            "data_time_domain.npy",      (460,  8)],
         # "chest_F":            ["chest",            "data_frequency_domain.npy", (550,  8)],
         "left_T":             ["left",             "data_time_domain.npy",      (460,  8)],
@@ -102,6 +102,9 @@ class Config:
             'depth_range':         (3,    10),
             'learning_rate_range': (0.01, 0.3),
             'l2_leaf_reg_range':   (1.0,  10.0),
+        },
+        'LogisticRegression': {
+            'C_range': (0.01, 100.0),
         },
     }
     
@@ -184,6 +187,11 @@ class Config:
             'depth':             6,
             'learning_rate':     0.1,
             'l2_leaf_reg':       3.0,
+        },
+        'LogisticRegression': {
+            'model_type':        'LogisticRegression',
+            'decision_threshold': 0.5,
+            'C':                 1.0,
         },
     }
     

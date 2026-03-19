@@ -19,11 +19,66 @@ from sklearn.metrics import (
     f1_score,
     roc_auc_score,
     roc_curve,
+    precision_recall_curve,
+    average_precision_score,
 )
 from sklearn.model_selection import GroupShuffleSplit, LeaveOneGroupOut
 from sklearn.preprocessing import StandardScaler
 
 from config import Config
+
+
+def save_prediction_artifacts(
+    output_dir,
+    y_true,
+    y_probs,
+    y_pred,
+    sample_indices=None,
+    group_ids=None,
+    window_ids=None,
+    scenario_name=None,
+    sensor_status=None,
+):
+    os.makedirs(output_dir, exist_ok=True)
+    np.save(os.path.join(output_dir, "y_true.npy"), np.asarray(y_true))
+    np.save(os.path.join(output_dir, "y_probs.npy"), np.asarray(y_probs))
+    np.save(os.path.join(output_dir, "y_pred.npy"), np.asarray(y_pred))
+
+    data = {
+        "y_true": np.asarray(y_true).astype(int),
+        "y_prob_0": np.asarray(y_probs)[:, 0],
+        "y_prob_1": np.asarray(y_probs)[:, 1],
+        "y_pred": np.asarray(y_pred).astype(int),
+    }
+
+    n = len(y_true)
+
+    if sample_indices is not None:
+        arr = np.asarray(sample_indices)
+        data["sample_index"] = arr[:n]
+        np.save(os.path.join(output_dir, "sample_indices.npy"), arr[:n])
+
+    if group_ids is not None:
+        arr = np.asarray(group_ids)
+        data["group_id"] = arr[:n]
+        np.save(os.path.join(output_dir, "group_ids.npy"), arr[:n])
+
+    if window_ids is not None:
+        arr = np.asarray(window_ids, dtype=object)
+        data["window_id"] = arr[:n]
+        np.save(os.path.join(output_dir, "window_ids.npy"), arr[:n])
+
+    if scenario_name is not None:
+        data["scenario"] = [scenario_name] * n
+
+    if sensor_status is not None:
+        missing = ",".join(sensor_status.get("missing", []))
+        available = ",".join(sensor_status.get("available", []))
+        data["missing_sensors"] = [missing] * n
+        data["available_sensors"] = [available] * n
+
+    pd.DataFrame(data).to_csv(os.path.join(output_dir, "predictions.csv"), index=False)
+
 
 def _cross_sensor_output_dirs(train_scenario, test_scenario, model_type, loss_type="weighted", scale=False, no_mag=False, only_mag=False):
     train_tag = train_scenario if loss_type == "weighted" else f"{train_scenario}_NW"
@@ -286,6 +341,7 @@ def run_cross_sensor_eval(
                 device=Config.DEVICE,
                 model_output_dir=model_out,
                 save_model=False,  # Do not save model again
+                scenario_name=test_scenario,
             )
 
     print(f"Strict sensor generalization results saved for training sensor: {train_scenario}")
@@ -300,6 +356,11 @@ def save_results(
     device,
     model_output_dir=None,
     save_model=True,
+    sample_indices=None,
+    group_ids=None,
+    window_ids=None,
+    scenario_name=None,
+    sensor_status=None,
 ):
     """Persist model checkpoint and full evaluation artifacts."""
     os.makedirs(output_dir, exist_ok=True)
@@ -344,9 +405,32 @@ def save_results(
     tn, fp, fn, tp = cm.ravel()
     save_metrics_csv(tp, fp, tn, fn, y_true, y_pred, output_dir)
     plot_roc_curve(y_probs[:, 1], y_true, output_dir, i)
+    plot_precision_recall_curve(y_probs[:, 1], y_true, output_dir, i)
 
     metrics = calculate_metrics(tp, tn, fp, fn, y_true, y_pred)
     record_metrics(metrics, tp, tn, fp, fn, i, output_dir)
+    save_prediction_artifacts(
+        output_dir=output_dir,
+        y_true=y_true,
+        y_probs=y_probs,
+        y_pred=y_pred,
+        sample_indices=sample_indices,
+        group_ids=group_ids,
+        scenario_name=scenario_name,
+        sensor_status=sensor_status,
+        window_ids=window_ids,
+    )
+    # save_prediction_artifacts(
+    #     output_dir=output_dir,
+    #     y_true=y_true,
+    #     y_probs=y_probs,
+    #     y_pred=y_pred,
+    #     sample_indices=sample_indices,
+    #     group_ids=group_ids,
+    #     scenario_name=scenario_name,
+    #     sensor_status=sensor_status,
+    #     window_ids=window_ids,
+    # )
 
 
 def save_results_classical(
@@ -358,6 +442,11 @@ def save_results_classical(
     output_dir,
     model_output_dir=None,
     save_model=True,
+    sample_indices=None,
+    group_ids=None,
+    scenario_name=None,
+    sensor_status=None,
+    window_ids=None,
 ):
     """Persist and evaluate classical sklearn/XGBoost/CatBoost models."""
     os.makedirs(output_dir, exist_ok=True)
@@ -390,9 +479,21 @@ def save_results_classical(
     # Always use the same output structure as neural networks
     save_metrics_csv(tp, fp, tn, fn, y_true, y_pred, output_dir)
     plot_roc_curve(y_probs[:, 1], y_true, output_dir, i)
+    plot_precision_recall_curve(y_probs[:, 1], y_true, output_dir, i)
 
     metrics = calculate_metrics(tp, tn, fp, fn, y_true, y_pred)
     record_metrics(metrics, tp, tn, fp, fn, i, output_dir)
+    save_prediction_artifacts(
+        output_dir=output_dir,
+        y_true=y_true,
+        y_probs=y_probs,
+        y_pred=y_pred,
+        sample_indices=sample_indices,
+        group_ids=group_ids,
+        scenario_name=scenario_name,
+        sensor_status=sensor_status,
+        window_ids=window_ids,
+    )
 
 
 def save_metrics_csv(tp, fp, tn, fn, y_true, y_pred, output_dir):
@@ -428,6 +529,24 @@ def plot_roc_curve(y_score, y_true, output_dir, i):
     plt.grid(True)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"roc_curve_model_{i}.png"), dpi=300, bbox_inches="tight")
+    plt.close()
+
+def plot_precision_recall_curve(y_score, y_true, output_dir, i):
+    """Save Precision-Recall curve plot."""
+    precision, recall, _ = precision_recall_curve(y_true, y_score)
+    ap = average_precision_score(y_true, y_score)
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(recall, precision, color="blue", lw=2, label=f"PR curve (AP = {ap:.2f})")
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title(f"Precision-Recall Curve - Modelo {i}")
+    plt.legend(loc="lower left")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"pr_curve_model_{i}.png"), dpi=300, bbox_inches="tight")
     plt.close()
 
 

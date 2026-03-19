@@ -298,6 +298,9 @@ def run_learning_curve(args):
     X = np.load(Config.get_data_file(scenario))
     y = np.load(Config.get_labels_file(scenario)).astype(np.int64)
     groups = np.load(Config.get_groups_file(scenario))
+    window_ids_path = os.path.join(os.path.dirname(Config.get_labels_file(scenario)), "window_ids.npy")
+    window_ids = np.load(window_ids_path, allow_pickle=True) if os.path.exists(window_ids_path) else None
+    # window_ids = np.load(Config.get_window_ids_file(scenario)) if os.path.exists(Config.get_window_ids_file(scenario)) else None    
 
     needs_group_rebuild = True
     if os.path.exists(test_data_path):
@@ -425,7 +428,7 @@ def _scan_output_dir(base_dir="output"):
     """Walk output directory and collect experiment summaries."""
     results = []
     for root, _, files in os.walk(base_dir):
-        if "summary_metrics.csv" not in files:
+        if not any(f.startswith("summary_metrics") for f in files):
             continue
         parts = root.replace("\\", "/").split("/")
         if len(parts) < 3:

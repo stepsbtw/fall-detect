@@ -81,8 +81,7 @@ def is_classical(model: str) -> bool:
 
 
 def _scenario_dir(scenario: str) -> str:
-    """Map 'chest_T' -> 'chest', 'chest_left_T' -> 'chest_left', etc."""
-    return scenario.rsplit("_", 1)[0]
+    return Config.SCENARIOS[scenario][0]
 
 
 def _expected_folds(scenario: str) -> int:
@@ -122,9 +121,14 @@ def is_train_done(
     scale: bool = False,
     no_mag: bool = False,
     only_mag: bool = False,
+    sensor_dropout: bool = False,
+    sensor_dropout_p: float = 0.5,
+    sensor_dropout_max_off: int = 1,
 ) -> bool:
     """Return True if every LOGO fold for this combo has a completed metrics file."""
     scenario_out = _train_scenario_out(model, scenario, loss, inner_val_groups, scale, no_mag, only_mag)
+    if sensor_dropout:
+        scenario_out = f"{scenario_out}_SDP{str(sensor_dropout_p).replace('.', 'p')}_M{int(sensor_dropout_max_off)}"
     output_dir = SCRIPT_DIR / "output" / model / scenario_out
     done = list(output_dir.glob("fold_s*/metrics.csv"))
     return len(done) >= _expected_folds(scenario)
@@ -134,8 +138,13 @@ def is_aggregate_done(model: str, scenario_out: str) -> bool:
     """Return True when aggregate outputs already exist for this variant."""
     output_dir = SCRIPT_DIR / "output" / model / scenario_out
     all_metrics = output_dir / "all_metrics.csv"
-    summary_metrics = output_dir / "summary_metrics.csv"
-    return all_metrics.exists() and summary_metrics.exists()
+    summary_standard = output_dir / "summary_metrics_standard.csv"
+    summary_confusion = output_dir / "summary_metrics_confusion.csv"
+    return (
+        all_metrics.exists()
+        and summary_standard.exists()
+        and summary_confusion.exists()
+    )
 
 
 def run_command(cmd: list[str]) -> None:
@@ -165,11 +174,19 @@ def run_train(
     scale: bool = False,
     no_mag: bool = False,
     only_mag: bool = False,
+    sensor_dropout: bool = False,
+    sensor_dropout_p: float = 0.5,
+    sensor_dropout_max_off: int = 1,
+    evaluate_missing: bool = False,
 ) -> None:
     scenario_out = _train_scenario_out(model, scenario, loss, inner_val_groups, scale, no_mag, only_mag)
+    if sensor_dropout:
+        scenario_out = f"{scenario_out}_SDP{str(sensor_dropout_p).replace('.', 'p')}_M{int(sensor_dropout_max_off)}"
     print(
         f">>  train  model={model}  scenario={scenario}  loss={loss}  "
-        f"inner_val_groups={inner_val_groups}  scale={scale}  no_mag={no_mag}  only_mag={only_mag}"
+        f"inner_val_groups={inner_val_groups}  scale={scale}  no_mag={no_mag}  only_mag={only_mag}  "
+        f"sensor_dropout={sensor_dropout}  sensor_dropout_p={sensor_dropout_p}  "
+        f"sensor_dropout_max_off={sensor_dropout_max_off}  evaluate_missing={evaluate_missing}"
     )
     cmd = [
         sys.executable,
@@ -192,6 +209,10 @@ def run_train(
         cmd += ["--no-mag"]
     if only_mag:
         cmd += ["--only-mag"]
+    if sensor_dropout:
+        cmd += ["--sensor-dropout", "--sensor-dropout-p", str(sensor_dropout_p), "--sensor-dropout-max-off", str(sensor_dropout_max_off)]
+    if evaluate_missing:
+        cmd += ["--evaluate-missing"]
     run_command(cmd)
     print(f"    done.")
 
@@ -236,6 +257,104 @@ def run_nested(
         cmd += ["--only-mag"]
     run_command(cmd)
     print(f"    done.")
+
+
+def run_ensemble(
+    model: str,
+    loss: str = "weighted",
+    inner_val_groups: int = 1,
+    scale: bool = False,
+    no_mag: bool = False,
+    only_mag: bool = False,
+    tag: str = "default",
+) -> None:
+    print(
+        f">>  ensemble  model={model}  loss={loss}  inner_val_groups={inner_val_groups}  "
+        f"scale={scale}  no_mag={no_mag}  only_mag={only_mag}  tag={tag}"
+    )
+    cmd = [
+        sys.executable, "-u", "multisensor.py", "ensemble",
+        "--model", model,
+        "--loss", loss,
+        "--inner-val-groups", str(inner_val_groups),
+        "--tag", tag,
+    ]
+    if scale:
+        cmd += ["--scale"]
+    if no_mag:
+        cmd += ["--no-mag"]
+    if only_mag:
+        cmd += ["--only-mag"]
+    run_command(cmd)
+    print("    done.")
+
+
+def run_stacking(
+    model: str,
+    loss: str = "weighted",
+    inner_val_groups: int = 1,
+    scale: bool = False,
+    no_mag: bool = False,
+    only_mag: bool = False,
+    tag: str = "default",
+) -> None:
+    print(
+        f">>  stacking  model={model}  loss={loss}  inner_val_groups={inner_val_groups}  "
+        f"scale={scale}  no_mag={no_mag}  only_mag={only_mag}  tag={tag}"
+    )
+    cmd = [
+        sys.executable, "-u", "multisensor.py", "stacking",
+        "--model", model,
+        "--loss", loss,
+        "--inner-val-groups", str(inner_val_groups),
+        "--tag", tag,
+    ]
+    if scale:
+        cmd += ["--scale"]
+    if no_mag:
+        cmd += ["--no-mag"]
+    if only_mag:
+        cmd += ["--only-mag"]
+    run_command(cmd)
+    print("    done.")
+
+
+def run_fused_missing_eval(
+    model: str,
+    train_scenario: str,
+    test_scenario: str,
+    loss: str = "weighted",
+    inner_val_groups: int = 1,
+    scale: bool = False,
+    no_mag: bool = False,
+    only_mag: bool = False,
+    sensor_dropout: bool = False,
+    sensor_dropout_p: float = 0.5,
+    sensor_dropout_max_off: int = 1,
+) -> None:
+    print(
+        f">>  fused_missing_eval  model={model}  train={train_scenario}  test={test_scenario}  "
+        f"loss={loss}  inner_val_groups={inner_val_groups}  scale={scale}  no_mag={no_mag}  "
+        f"only_mag={only_mag}  sensor_dropout={sensor_dropout}"
+    )
+    cmd = [
+        sys.executable, "-u", "fused_missing_eval.py",
+        "--model", model,
+        "--train-scenario", train_scenario,
+        "--test-scenario", test_scenario,
+        "--loss", loss,
+        "--inner-val-groups", str(inner_val_groups),
+    ]
+    if scale:
+        cmd += ["--scale"]
+    if no_mag:
+        cmd += ["--no-mag"]
+    if only_mag:
+        cmd += ["--only-mag"]
+    if sensor_dropout:
+        cmd += ["--sensor-dropout", "--sensor-dropout-p", str(sensor_dropout_p), "--sensor-dropout-max-off", str(sensor_dropout_max_off)]
+    run_command(cmd)
+    print("    done.")
 
 
 def run_aggregate(model: str, scenario_out: str) -> None:
@@ -290,7 +409,8 @@ def parse_args() -> argparse.Namespace:
              "'unweighted' uses plain CrossEntropyLoss. Results are saved to <scenario>_NW dirs.",
     )
     parser.add_argument(
-        "--inner_val_groups",
+        "--inner-val-groups",
+        dest="inner_val_groups",
         type=int,
         default=1,
         metavar="N",
@@ -319,6 +439,15 @@ def parse_args() -> argparse.Namespace:
         help="Keep only the engineered magnitude channels (mag_acc, mag_gyr), dropping raw axes. "
              "Results are saved to <scenario>_OM directories.",
     )
+    parser.add_argument("--ensemble", action="store_true", help="Run multisensor late-fusion ensemble from saved fold predictions")
+    parser.add_argument("--stacking", action="store_true", help="Run multisensor stacking from saved fold predictions")
+    parser.add_argument("--fused_missing_eval", action="store_true", help="Evaluate a fused model on a smaller scenario by zero-padding missing sensors")
+    parser.add_argument("--test_scenario", type=str, help="Target scenario for --fused_missing_eval")
+    parser.add_argument("--sensor-dropout", action="store_true", default=False, help="Enable structured sensor dropout during training")
+    parser.add_argument("--sensor-dropout-p", type=float, default=0.5, metavar="P", help="Probability of masking one or more sensor blocks during training")
+    parser.add_argument("--sensor-dropout-max-off", type=int, default=1, metavar="N", help="Maximum number of sensor blocks to mask during training")
+    parser.add_argument("--evaluate-missing", action="store_true", default=False, help="After each fold, also evaluate deterministic missing-sensor conditions")
+    parser.add_argument("--tag", default="default", help="Optional suffix for ensemble/stacking outputs")
     return parser.parse_args()
 
 
@@ -340,6 +469,56 @@ def main() -> None:
             scale=args.scale,
             no_mag=args.no_mag,
             only_mag=args.only_mag,
+        )
+        return
+
+    if args.ensemble:
+        if not args.model:
+            print("--model is required for --ensemble.")
+            return
+        run_ensemble(
+            model=args.model,
+            loss=args.loss,
+            inner_val_groups=args.inner_val_groups,
+            scale=args.scale,
+            no_mag=args.no_mag,
+            only_mag=args.only_mag,
+            tag=args.tag,
+        )
+        return
+
+    if args.stacking:
+        if not args.model:
+            print("--model is required for --stacking.")
+            return
+        run_stacking(
+            model=args.model,
+            loss=args.loss,
+            inner_val_groups=args.inner_val_groups,
+            scale=args.scale,
+            no_mag=args.no_mag,
+            only_mag=args.only_mag,
+            tag=args.tag,
+        )
+        return
+
+    if args.fused_missing_eval:
+        train_scenario = args.train_scenario or args.scenario
+        if not (args.model and train_scenario and args.test_scenario):
+            print("--model, one of --scenario/--train_scenario, and --test_scenario are required for --fused_missing_eval.")
+            return
+        run_fused_missing_eval(
+            model=args.model,
+            train_scenario=train_scenario,
+            test_scenario=args.test_scenario,
+            loss=args.loss,
+            inner_val_groups=args.inner_val_groups,
+            scale=args.scale,
+            no_mag=args.no_mag,
+            only_mag=args.only_mag,
+            sensor_dropout=args.sensor_dropout,
+            sensor_dropout_p=args.sensor_dropout_p,
+            sensor_dropout_max_off=args.sensor_dropout_max_off,
         )
         return
 
@@ -370,6 +549,10 @@ def main() -> None:
         print(f"  scale     : {args.scale}")
         print(f"  no_mag    : {args.no_mag}")
         print(f"  only_mag  : {args.only_mag}")
+        print(f"  sensor_dropout        : {args.sensor_dropout}")
+        print(f"  sensor_dropout_p      : {args.sensor_dropout_p}")
+        print(f"  sensor_dropout_max_off: {args.sensor_dropout_max_off}")
+        print(f"  evaluate_missing      : {args.evaluate_missing}")
     if args.nested:
         print(f"  n_trials  : {args.n_trials} (inner, per outer fold) | epochs: {args.epochs} (NN only)")
         print(f"  inner     : {args.inner}")
@@ -392,7 +575,7 @@ def main() -> None:
             print(f"-- [{count}/{total}]  {model} / {scenario} --")
 
             if args.train:
-                if is_train_done(model, scenario, args.loss, args.inner_val_groups, args.scale, args.no_mag, args.only_mag):
+                if is_train_done(model, scenario, args.loss, args.inner_val_groups, args.scale, args.no_mag, args.only_mag, args.sensor_dropout, args.sensor_dropout_p, args.sensor_dropout_max_off):
                     print(f"   [skip] train {model}/{scenario} — all folds already done.")
                 else:
                     run_train(
@@ -404,6 +587,10 @@ def main() -> None:
                         args.scale,
                         args.no_mag,
                         args.only_mag,
+                        args.sensor_dropout,
+                        args.sensor_dropout_p,
+                        args.sensor_dropout_max_off,
+                        args.evaluate_missing,
                     )
 
             if args.nested:
