@@ -451,8 +451,27 @@ def evaluate_padded_fused_model(
     sensor_dropout_p=0.5,
     sensor_dropout_max_off=1,
 ):
-    """Evaluate an already-trained fused model on a smaller scenario using zero-padded canonical sensor blocks."""
-    from src.train import create_model, _input_shape_from_data, _make_classical_model, drop_mag_channels, keep_only_mag_channels
+    """Evaluate a fused model on valid missing-sensor subsets of its training sensor set."""
+    from src.train import create_model, _input_shape_from_data, drop_mag_channels, keep_only_mag_channels
+
+    train_sensors = tuple(sensors_from_scenario(train_scenario))
+    test_sensors = tuple(sensors_from_scenario(test_scenario))
+    train_shape = Config.SCENARIOS[train_scenario][2]
+    test_shape = Config.SCENARIOS[test_scenario][2]
+
+    allowed_targets = [
+        scenario_name
+        for scenario_name, (_, _, shape) in Config.SCENARIOS.items()
+        if shape[0] == train_shape[0]
+        and tuple(sensors_from_scenario(scenario_name)) != train_sensors
+        and set(sensors_from_scenario(scenario_name)).issubset(set(train_sensors))
+    ]
+
+    if test_scenario not in allowed_targets:
+        raise ValueError(
+            f"Invalid fused-missing pair: {train_scenario} -> {test_scenario}. "
+            f"Allowed test scenarios for {train_scenario}: {allowed_targets}"
+        )
 
     train_out = scenario_output_name(
         model_type,
@@ -481,7 +500,8 @@ def evaluate_padded_fused_model(
     if only_mag:
         X = keep_only_mag_channels(X)
 
-    X = expand_to_canonical(X, test_scenario)
+    # Expand the smaller test scenario into the *training* sensor space, not always to 24 channels.
+    X = expand_to_canonical(X, test_scenario, target_sensors=train_sensors)
     logo = LeaveOneGroupOut()
     threshold = Config.DEFAULT_PARAMS[model_type].get("decision_threshold", 0.5)
     rows = []
@@ -501,21 +521,37 @@ def evaluate_padded_fused_model(
                 train_X = drop_mag_channels(train_X)
             if only_mag:
                 train_X = keep_only_mag_channels(train_X)
+
+            train_X = expand_to_canonical(train_X, train_scenario, target_sensors=train_sensors)
             train_mask = train_groups != left_out
             X_fit = train_X[train_mask]
-            n_tr, t_steps, n_ch = X_fit.shape
+
+            if X_fit.shape[1:] != X_test.shape[1:]:
+                raise ValueError(
+                    "Shape mismatch before scaling in fused-missing evaluation: "
+                    f"X_fit={X_fit.shape}, X_test={X_test.shape}"
+                )
+
+            ch_fit = X_fit.shape[-1]
             scaler = StandardScaler()
-            X_fit = scaler.fit_transform(X_fit.reshape(-1, n_ch)).reshape(n_tr, t_steps, n_ch)
-            X_test = scaler.transform(X_test.reshape(-1, n_ch)).reshape(X_test.shape[0], t_steps, n_ch)
+            scaler.fit(X_fit.reshape(-1, ch_fit))
+            X_test = scaler.transform(X_test.reshape(-1, ch_fit)).reshape(X_test.shape)
 
         if model_type in Config.CLASSICAL_MODELS:
             model_path = os.path.join(model_root, f"fold_{fold_label}", f"model_{fold_label}.pkl")
             if not os.path.exists(model_path):
                 raise FileNotFoundError(model_path)
             clf = joblib.load(model_path)
+            X_test_flat = X_test.reshape(len(X_test), -1)
+            expected_features = getattr(clf, "n_features_in_", X_test_flat.shape[1])
+            if X_test_flat.shape[1] != expected_features:
+                raise ValueError(
+                    f"Feature mismatch for {fold_label}: model expects {expected_features}, "
+                    f"but {train_scenario} -> {test_scenario} produced {X_test_flat.shape[1]} features."
+                )
             save_results_classical(
                 clf=clf,
-                X_test_flat=X_test.reshape(len(X_test), -1),
+                X_test_flat=X_test_flat,
                 y_test=y_test,
                 decision_threshold=threshold,
                 i=fold_label,

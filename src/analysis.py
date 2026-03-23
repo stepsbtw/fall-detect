@@ -148,6 +148,7 @@ def _save_csv_and_txt(df, csv_path, title, output_root=None):
     with open(tex_path, "w", encoding="utf-8") as f:
         f.write(latex_table)
 
+
 def run_shap(args):
     """Compute and save SHAP feature importance for the best trained model."""
     import shap
@@ -259,6 +260,7 @@ def run_shap(args):
 
     print("SHAP concluído!")
 
+
 def run_learning_curve(args):
     """Generate and save the learning curve for a scenario."""
     scenario = args.scenario
@@ -300,7 +302,7 @@ def run_learning_curve(args):
     groups = np.load(Config.get_groups_file(scenario))
     window_ids_path = os.path.join(os.path.dirname(Config.get_labels_file(scenario)), "window_ids.npy")
     window_ids = np.load(window_ids_path, allow_pickle=True) if os.path.exists(window_ids_path) else None
-    # window_ids = np.load(Config.get_window_ids_file(scenario)) if os.path.exists(Config.get_window_ids_file(scenario)) else None    
+    # window_ids = np.load(Config.get_window_ids_file(scenario)) if os.path.exists(Config.get_window_ids_file(scenario)) else None
 
     needs_group_rebuild = True
     if os.path.exists(test_data_path):
@@ -348,6 +350,7 @@ def run_learning_curve(args):
         epochs=args.epochs,
         loss_type=loss_type,
     )
+
 
 def _aggregate_model_metrics(base_out):
     """Aggregate per-model CSVs into all_metrics.csv and summary_metrics.csv."""
@@ -424,6 +427,7 @@ def run_aggregate(args):
     banner = "AGREGAÇÃO DE MÉTRICAS CONCLUÍDA COM SUCESSO!" if success else "ERRO NA AGREGAÇÃO DE MÉTRICAS!"
     print(f"\n{'='*50}\n{banner}\n{'='*50}")
 
+
 def _scan_output_dir(base_dir="output"):
     """Walk output directory and collect experiment summaries.
 
@@ -457,6 +461,9 @@ def _scan_output_dir(base_dir="output"):
         model_type = parts[-2]
         scenario = parts[-1]
 
+        prediction_files = sorted(glob.glob(os.path.join(root, "predictions_*.csv")))
+        condition_fold_metric_files = sorted(glob.glob(os.path.join(root, "fold_metrics_*.csv")))
+
         results.append({
             "model_type": model_type,
             "scenario": scenario,
@@ -464,9 +471,12 @@ def _scan_output_dir(base_dir="output"):
             "all_metrics": os.path.join(root, "all_metrics.csv") if has_all_metrics else None,
             "summary_metrics": os.path.join(root, summary_candidates[0]) if summary_candidates else None,
             "fold_metrics": fold_metric_files,
+            "prediction_files": prediction_files,
+            "condition_fold_metrics": condition_fold_metric_files,
         })
 
     return pd.DataFrame(results)
+
 
 def _ensure_aggregated(df):
     """Create all_metrics.csv automatically when only fold metrics exist."""
@@ -498,6 +508,106 @@ def _ensure_aggregated(df):
 
     return pd.DataFrame(updated_rows)
 
+
+def _compute_binary_metrics(y_true, y_pred):
+    y_true = np.asarray(y_true).astype(int)
+    y_pred = np.asarray(y_pred).astype(int)
+    tp = int(((y_true == 1) & (y_pred == 1)).sum())
+    fp = int(((y_true == 0) & (y_pred == 1)).sum())
+    tn = int(((y_true == 0) & (y_pred == 0)).sum())
+    fn = int(((y_true == 1) & (y_pred == 0)).sum())
+
+    accuracy = (tp + tn) / len(y_true) if len(y_true) else np.nan
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+
+    return {
+        "acc": accuracy,
+        "prec": precision,
+        "rec": recall,
+        "f1": f1,
+        "tp": tp,
+        "fp": fp,
+        "tn": tn,
+        "fn": fn,
+    }
+
+
+
+def _summarize_multisensor_prediction_file(predictions_path, model_type, scenario, condition_name=None):
+    pred_df = pd.read_csv(predictions_path)
+    if pred_df.empty or "y_true" not in pred_df.columns:
+        return None, []
+
+    group_col = None
+    for candidate in ["group_id", "subject_id", "Model"]:
+        if candidate in pred_df.columns:
+            group_col = candidate
+            break
+    if group_col is None:
+        return None, []
+
+    pred_col = None
+    for candidate in ["y_pred_stacked", "y_pred_fused", "y_pred"]:
+        if candidate in pred_df.columns:
+            pred_col = candidate
+            break
+    if pred_col is None:
+        prob_candidates = [c for c in pred_df.columns if c.startswith("y_prob")]
+        if prob_candidates:
+            pred_col = prob_candidates[0]
+            pred_df["_tmp_pred"] = (pred_df[pred_col].to_numpy() >= 0.5).astype(int)
+            pred_col = "_tmp_pred"
+    if pred_col is None:
+        return None, []
+
+    if condition_name is None:
+        basename = os.path.splitext(os.path.basename(predictions_path))[0]
+        if basename.startswith("predictions_"):
+            condition_name = basename[len("predictions_"):]
+        else:
+            condition_name = scenario
+
+    scenario_label = f"{scenario}_{condition_name}"
+    per_group_rows = []
+    for group_value, group_df in pred_df.groupby(group_col):
+        metrics = _compute_binary_metrics(group_df["y_true"].to_numpy(), group_df[pred_col].to_numpy())
+        per_group_rows.append({
+            "subject_id": group_value,
+            "model_type": model_type,
+            "scenario": scenario_label,
+            "base_scenario": scenario,
+            "condition": condition_name,
+            **metrics,
+        })
+
+    if not per_group_rows:
+        return None, []
+
+    metrics_df = pd.DataFrame(per_group_rows)
+    summary = {
+        "model_type": model_type,
+        "scenario": scenario_label,
+        "base_scenario": scenario,
+        "condition": condition_name,
+    }
+    for met in ["f1", "acc", "prec", "rec"]:
+        summary[f"{met}_mean"] = metrics_df[met].mean()
+        summary[f"{met}_std"] = metrics_df[met].std(ddof=1)
+    for met, label in zip(["tp", "fp", "tn", "fn"], ["TP", "FP", "TN", "FN"]):
+        summary[label] = metrics_df[met].sum()
+    return summary, per_group_rows
+
+
+def _subject_sort_key(value):
+    s = str(value)
+    try:
+        return (0, int(float(s)))
+    except Exception:
+        return (1, s)
+
+
 def _analyze_final_models(df, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     csv_root = os.path.join(output_dir, "csv")
@@ -506,11 +616,46 @@ def _analyze_final_models(df, output_dir):
     summary_rows = []
     subject_rows = []
     for _, row in df.iterrows():
-        metrics_source = row.get("all_metrics") or row.get("summary_metrics")
-        if not metrics_source or not os.path.exists(metrics_source):
+        prediction_files = row.get("prediction_files", [])
+        used_prediction_breakdown = False
+
+        if isinstance(prediction_files, list) and prediction_files:
+            for prediction_file in prediction_files:
+                condition_name = os.path.splitext(os.path.basename(prediction_file))[0].replace("predictions_", "", 1)
+                summary, per_group_rows = _summarize_multisensor_prediction_file(
+                    prediction_file,
+                    model_type=row["model_type"],
+                    scenario=row["scenario"],
+                    condition_name=condition_name,
+                )
+                if summary is not None:
+                    summary_rows.append(summary)
+                    subject_rows.extend(per_group_rows)
+                    used_prediction_breakdown = True
+
+        if used_prediction_breakdown:
+            continue
+
+        all_metrics = row.get("all_metrics")
+        summary_metrics = row.get("summary_metrics")
+
+        metrics_source = None
+        if pd.notna(all_metrics) and isinstance(all_metrics, (str, os.PathLike)) and all_metrics:
+            metrics_source = all_metrics
+        elif pd.notna(summary_metrics) and isinstance(summary_metrics, (str, os.PathLike)) and summary_metrics:
+            metrics_source = summary_metrics
+
+        if metrics_source is None or not os.path.exists(metrics_source):
             continue
 
         metrics_df = pd.read_csv(metrics_source)
+
+        metrics_df = metrics_df.rename(columns={
+            "Accuracy": "acc",
+            "Precision": "prec",
+            "Recall": "rec",
+        })
+
         metricas_plot = [c for c in ["f1", "acc", "prec", "rec", "tp", "fp", "tn", "fn"] if c in metrics_df.columns]
         if not metricas_plot:
             print(f"Nenhuma métrica reconhecida em {metrics_source}, pulando.")
@@ -585,18 +730,24 @@ def _analyze_final_models(df, output_dir):
     if not subject_df.empty and "subject_id" in subject_df.columns:
         subject_dir = os.path.join(csv_root, "summary_final_models_by_subject")
         os.makedirs(subject_dir, exist_ok=True)
-        for subject_id in sorted(subject_df["subject_id"].dropna().unique()):
+
+        def _subject_sort_key(value):
+            s = str(value).strip()
+            return (0, int(s)) if s.isdigit() else (1, s)
+
+        unique_subject_ids = [sid for sid in subject_df["subject_id"].dropna().unique()]
+        for subject_id in sorted(unique_subject_ids, key=_subject_sort_key):
             subject_metrics_df = subject_df[subject_df["subject_id"] == subject_id].reset_index(drop=True)
-            subject_csv = os.path.join(subject_dir, f"summary_final_models_{subject_id}.csv")
+            subject_label = str(subject_id).strip()
+            subject_csv = os.path.join(subject_dir, f"summary_final_models_{subject_label}.csv")
             _save_csv_and_txt(
                 subject_metrics_df,
                 subject_csv,
-                f"Final Models Summary - Subject: {subject_id}",
+                f"Final Models Summary - Subject: {subject_label}",
                 output_root=output_dir,
             )
 
     return summary_df, subject_df
-
 
 def _analyze_per_model(summary_df, subject_df, base_dir):
     """Write per-model summary bundles inside each model folder."""
@@ -648,7 +799,8 @@ def _analyze_per_model(summary_df, subject_df, base_dir):
             if "subject_id" in model_subject_df.columns:
                 by_subject_dir = os.path.join(model_csv_root, "summary_by_subject")
                 os.makedirs(by_subject_dir, exist_ok=True)
-                for subject_id in sorted(model_subject_df["subject_id"].dropna().unique()):
+                unique_subject_ids = model_subject_df["subject_id"].dropna().unique()
+                for subject_id in sorted(unique_subject_ids, key=_subject_sort_key):
                     subject_metrics_df = model_subject_df[model_subject_df["subject_id"] == subject_id].reset_index(drop=True)
                     subject_csv = os.path.join(by_subject_dir, f"summary_{model_type}_{subject_id}.csv")
                     _save_csv_and_txt(
@@ -659,6 +811,7 @@ def _analyze_per_model(summary_df, subject_df, base_dir):
                     )
 
         print(f"Pacote de resumo por modelo salvo em: {model_analysis_root}")
+
 
 def _write_master_analysis_tex(output_dir):
     """Create a minimal master LaTeX file with required packages and \\input statements."""
@@ -730,6 +883,7 @@ def run_analyze(args):
 
     if not summary_df.empty and not subject_df.empty:
         _analyze_per_model(summary_df, subject_df, args.base_dir)
+
 
 def build_parser():
     parser = argparse.ArgumentParser(

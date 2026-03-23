@@ -11,11 +11,8 @@ from src.config import Config
 from src.train import main as train_main
 from src.validation import main as validation_main
 from src.test import run_cross_sensor_eval, evaluate_padded_fused_model
-from src.validation import run_multisensor_ensemble as run_ensemble, run_multisensor_stacking as run_stacking
-try:
-    from src.analysis import main as analysis_main
-except ImportError:
-    from analysis import main as analysis_main
+from src.validation import run_ensemble, run_stacking
+from src.analysis import main as analysis_main
 
 
 # ------------------------------------------------------------------
@@ -80,7 +77,7 @@ def run_fused_missing(args):
     print(f">> FUSED MISSING | model={args.model}")
 
     evaluate_padded_fused_model(
-        model=args.model,
+        model_type=args.model,
         train_scenario=args.scenario,
         test_scenario=args.test_scenario,
         loss=args.loss,
@@ -108,6 +105,7 @@ def run_multisensor(args):
         scale=args.scale,
         no_mag=args.no_mag,
         only_mag=args.only_mag,
+        threshold=args.threshold,
         tag=args.tag,
     )
 
@@ -174,6 +172,8 @@ def build_parser():
     parser.add_argument("--sensor_dropout", action="store_true")
     parser.add_argument("--sensor_dropout_p", type=float, default=0.5)
     parser.add_argument("--sensor_dropout_max_off", type=int, default=1)
+
+    parser.add_argument("--threshold", type=float, default=0.5)
 
     return parser
 
