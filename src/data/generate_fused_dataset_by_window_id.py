@@ -10,6 +10,20 @@ from data_training_builders import create_directory_if_does_not_exist
 
 
 DEFAULT_POSITIONS = ["chest", "left", "right"]
+REFERENCE_METADATA_COLS = [
+    "group_id",
+    "y_true",
+    "exercise",
+    "with_rifle",
+    "occurrence_rank",
+    "subwindow_idx",
+    "alignment_mode",
+]
+PER_POSITION_METADATA_COLS = [
+    "window_start_ms",
+    "window_end_ms",
+    "duration_ms",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,6 +77,14 @@ def parse_args() -> argparse.Namespace:
         "--require-group-match",
         action="store_true",
         help="Fail if matched rows disagree on group_id across positions.",
+    )
+    parser.add_argument(
+        "--require-timing-match",
+        action="store_true",
+        help=(
+            "Fail if matched rows disagree on per-position timing columns "
+            "(window_start_ms/window_end_ms/duration_ms). Keep this off for matched_sessions datasets."
+        ),
     )
     return parser.parse_args()
 
@@ -145,16 +167,7 @@ def prepare_position_table(position: str, dataset_dir: str, dataset_root: str) -
         raise ValueError(f"Metadata for {dataset_dir} is missing columns: {missing}")
 
     keep_cols = ["index", "window_id"]
-    optional_cols = [
-        "group_id",
-        "y_true",
-        "window_start_ms",
-        "window_end_ms",
-        "exercise",
-        "with_rifle",
-        "occurrence_rank",
-        "subwindow_idx",
-    ]
+    optional_cols = REFERENCE_METADATA_COLS + PER_POSITION_METADATA_COLS
     for col in optional_cols:
         if col in meta.columns:
             keep_cols.append(col)
@@ -164,12 +177,14 @@ def prepare_position_table(position: str, dataset_dir: str, dataset_root: str) -
             "index": f"index_{position}",
             "group_id": f"group_id_{position}",
             "y_true": f"y_true_{position}",
-            "window_start_ms": f"window_start_ms_{position}",
-            "window_end_ms": f"window_end_ms_{position}",
             "exercise": f"exercise_{position}",
             "with_rifle": f"with_rifle_{position}",
             "occurrence_rank": f"occurrence_rank_{position}",
             "subwindow_idx": f"subwindow_idx_{position}",
+            "alignment_mode": f"alignment_mode_{position}",
+            "window_start_ms": f"window_start_ms_{position}",
+            "window_end_ms": f"window_end_ms_{position}",
+            "duration_ms": f"duration_ms_{position}",
         }
     )
 
@@ -183,12 +198,34 @@ def prepare_position_table(position: str, dataset_dir: str, dataset_root: str) -
     return meta
 
 
+def _validate_equal_columns(
+    merged: pd.DataFrame,
+    prefixes: List[str],
+    description: str,
+    required: bool,
+) -> None:
+    if not required:
+        return
+    for prefix in prefixes:
+        cols = [c for c in merged.columns if c.startswith(f"{prefix}_")]
+        if not cols:
+            continue
+        ok = merged[cols].nunique(axis=1, dropna=False) == 1
+        if not bool(ok.all()):
+            bad = merged.loc[~ok, ["window_id", *cols]].head(10)
+            raise ValueError(
+                f"Matched rows disagree on {description or prefix} across positions. Examples:\n"
+                f"{bad.to_string(index=False)}"
+            )
+
+
 def build_joined_index(
     positions: List[str],
     dataset_dirs: List[str],
     input_root: str,
     require_label_match: bool,
     require_group_match: bool,
+    require_timing_match: bool,
 ) -> Tuple[pd.DataFrame, Dict[str, str]]:
     tables = []
     roots: Dict[str, str] = {}
@@ -202,37 +239,20 @@ def build_joined_index(
     if merged.empty:
         raise ValueError("No common window_id values were found across the requested datasets")
 
-    group_cols = [c for c in merged.columns if c.startswith("group_id_")]
-    label_cols = [c for c in merged.columns if c.startswith("y_true_")]
-
-    if require_group_match and group_cols:
-        group_ok = merged[group_cols].nunique(axis=1) == 1
-        if not bool(group_ok.all()):
-            bad = merged.loc[~group_ok, ["window_id", *group_cols]].head(10)
-            raise ValueError(
-                "Matched rows disagree on group_id across positions. Examples:\n"
-                f"{bad.to_string(index=False)}"
-            )
-
-    for prefix, description in [("window_start_ms", "window_start_ms"), ("window_end_ms", "window_end_ms")]:
-        cols = [c for c in merged.columns if c.startswith(f"{prefix}_")]
-        if cols:
-            ok = merged[cols].nunique(axis=1) == 1
-            if not bool(ok.all()):
-                bad = merged.loc[~ok, ["window_id", *cols]].head(10)
-                raise ValueError(
-                    f"Matched rows disagree on {description} across positions. Examples:\n"
-                    f"{bad.to_string(index=False)}"
-                )
-
-    if require_label_match and label_cols:
-        label_ok = merged[label_cols].nunique(axis=1) == 1
-        if not bool(label_ok.all()):
-            bad = merged.loc[~label_ok, ["window_id", *label_cols]].head(10)
-            raise ValueError(
-                "Matched rows disagree on y_true across positions. Examples:\n"
-                f"{bad.to_string(index=False)}"
-            )
+    _validate_equal_columns(merged, ["group_id"], "group_id", require_group_match)
+    _validate_equal_columns(merged, ["y_true"], "y_true", require_label_match)
+    _validate_equal_columns(
+        merged,
+        ["exercise", "with_rifle", "occurrence_rank", "subwindow_idx", "alignment_mode"],
+        "reference metadata",
+        required=True,
+    )
+    _validate_equal_columns(
+        merged,
+        ["window_start_ms", "window_end_ms", "duration_ms"],
+        "timing metadata",
+        require_timing_match,
+    )
 
     sort_cols = [f"group_id_{positions[0]}", "window_id"] if f"group_id_{positions[0]}" in merged.columns else ["window_id"]
     merged = merged.sort_values(sort_cols).reset_index(drop=True)
@@ -245,6 +265,24 @@ def select_reference_column(frame: pd.DataFrame, prefix: str, positions: List[st
         if column in frame.columns:
             return column
     raise ValueError(f"Could not find any column with prefix '{prefix}'")
+
+
+def _collect_per_position_metadata(metadata: pd.DataFrame, joined: pd.DataFrame, positions: List[str]) -> None:
+    for base_col in PER_POSITION_METADATA_COLS:
+        available_cols = []
+        for position in positions:
+            col = f"{base_col}_{position}"
+            if col in joined.columns:
+                available_cols.append((position, col))
+                metadata[col] = joined[col].to_numpy()
+
+        if not available_cols:
+            continue
+
+        reference_values = joined[available_cols[0][1]].to_numpy()
+        all_equal = all(np.array_equal(reference_values, joined[col].to_numpy(), equal_nan=True) for _, col in available_cols[1:])
+        if all_equal:
+            metadata[base_col] = reference_values
 
 
 def main() -> None:
@@ -262,6 +300,7 @@ def main() -> None:
         input_root=input_root,
         require_label_match=args.require_label_match,
         require_group_match=args.require_group_match,
+        require_timing_match=args.require_timing_match,
     )
 
     time_parts = []
@@ -336,10 +375,16 @@ def main() -> None:
             "y_true": labels,
         }
     )
-    for base_col in ["window_start_ms", "window_end_ms", "exercise", "with_rifle", "occurrence_rank", "subwindow_idx"]:
-        ref_col = select_reference_column(joined, base_col, positions) if any(c.startswith(f"{base_col}_") for c in joined.columns) else None
+
+    for base_col in REFERENCE_METADATA_COLS:
+        ref_col = select_reference_column(joined, base_col, positions) if any(
+            c.startswith(f"{base_col}_") for c in joined.columns
+        ) else None
         if ref_col:
             metadata[base_col] = joined[ref_col].to_numpy()
+
+    _collect_per_position_metadata(metadata, joined, positions)
+
     metadata.to_csv(os.path.join(data_out_dir, "metadata.csv"), index=False)
     metadata.to_csv(os.path.join(label_out_dir, "metadata.csv"), index=False)
 
