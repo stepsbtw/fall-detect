@@ -19,9 +19,9 @@ import pandas as pd
 from datetime import datetime
 from sklearn.model_selection import GroupShuffleSplit
 
-from config import Config
-from training import create_model
-from test import (
+from src.config import Config
+from src.train import create_model
+from src.test import (
     load_model_state,
     load_hyperparameters,
     load_test_data,
@@ -425,23 +425,78 @@ def run_aggregate(args):
     print(f"\n{'='*50}\n{banner}\n{'='*50}")
 
 def _scan_output_dir(base_dir="output"):
-    """Walk output directory and collect experiment summaries."""
+    """Walk output directory and collect experiment summaries.
+
+    Supports:
+    - output/<model>/<scenario>/all_metrics.csv
+    - output/<model>/<scenario>/summary_metrics.csv
+    - output/<model>/<scenario>/summary_metrics_*.csv
+    - output/<model>/<scenario>/fold_s*/metrics.csv
+    """
     results = []
+
     for root, _, files in os.walk(base_dir):
-        if not any(f.startswith("summary_metrics") for f in files):
-            continue
-        parts = root.replace("\\", "/").split("/")
+        parts = [p for p in root.replace("\\", "/").split("/") if p]
         if len(parts) < 3:
             continue
-        nn = parts[-2]
+
+        # Expected experiment root: output/<model>/<scenario>
+        if parts[-1] == "analysis" or parts[-2] == "analysis":
+            continue
+
+        summary_candidates = sorted(
+            [f for f in files if f == "summary_metrics.csv" or f.startswith("summary_metrics_")]
+        )
+        has_all_metrics = "all_metrics.csv" in files
+        fold_metric_files = sorted(glob.glob(os.path.join(root, "fold_s*", "metrics.csv")))
+        has_fold_metrics = len(fold_metric_files) > 0
+
+        if not summary_candidates and not has_all_metrics and not has_fold_metrics:
+            continue
+
+        model_type = parts[-2]
         scenario = parts[-1]
+
         results.append({
-            "model_type": nn,
+            "model_type": model_type,
             "scenario": scenario,
-            "all_metrics": os.path.join(root, "all_metrics.csv") if "all_metrics.csv" in files else None,
+            "experiment_dir": root,
+            "all_metrics": os.path.join(root, "all_metrics.csv") if has_all_metrics else None,
+            "summary_metrics": os.path.join(root, summary_candidates[0]) if summary_candidates else None,
+            "fold_metrics": fold_metric_files,
         })
+
     return pd.DataFrame(results)
 
+def _ensure_aggregated(df):
+    """Create all_metrics.csv automatically when only fold metrics exist."""
+    if df.empty:
+        return df
+
+    updated_rows = []
+
+    for _, row in df.iterrows():
+        row = row.copy()
+        exp_dir = row["experiment_dir"]
+        all_metrics_path = os.path.join(exp_dir, "all_metrics.csv")
+
+        if not os.path.exists(all_metrics_path):
+            fold_metrics = row.get("fold_metrics", [])
+            if fold_metrics:
+                print(f"Agregando automaticamente: model={row['model_type']} | scenario={row['scenario']}")
+                success = _aggregate_model_metrics(exp_dir)
+                if success and os.path.exists(all_metrics_path):
+                    row["all_metrics"] = all_metrics_path
+
+                    summary_candidates = sorted(
+                        glob.glob(os.path.join(exp_dir, "summary_metrics*.csv"))
+                    )
+                    if summary_candidates:
+                        row["summary_metrics"] = summary_candidates[0]
+
+        updated_rows.append(row)
+
+    return pd.DataFrame(updated_rows)
 
 def _analyze_final_models(df, output_dir):
     os.makedirs(output_dir, exist_ok=True)
@@ -451,23 +506,23 @@ def _analyze_final_models(df, output_dir):
     summary_rows = []
     subject_rows = []
     for _, row in df.iterrows():
-        if not row["all_metrics"]:
-            continue
-        metrics_df = pd.read_csv(row["all_metrics"])
-        # Always include confusion matrix columns if present
-        metricas_plot = [c for c in ["f1", "acc", "prec", "rec", "tp", "fp", "tn", "fn"] if c in metrics_df.columns]
-        if not metricas_plot:
-            print(f"Nenhuma métrica reconhecida em {row['all_metrics']}, pulando.")
+        metrics_source = row.get("all_metrics") or row.get("summary_metrics")
+        if not metrics_source or not os.path.exists(metrics_source):
             continue
 
-        # Only aggregate mean/std for non-confusion-matrix metrics
+        metrics_df = pd.read_csv(metrics_source)
+        metricas_plot = [c for c in ["f1", "acc", "prec", "rec", "tp", "fp", "tn", "fn"] if c in metrics_df.columns]
+        if not metricas_plot:
+            print(f"Nenhuma métrica reconhecida em {metrics_source}, pulando.")
+            continue
+
         agg_metrics = [m for m in metricas_plot if m not in ["tp", "fp", "tn", "fn"]]
         stats = metrics_df[agg_metrics].describe().loc[["mean", "std"]] if agg_metrics else pd.DataFrame()
+
         summary = {"model_type": row["model_type"], "scenario": row["scenario"]}
         for met in agg_metrics:
             summary[f"{met}_mean"] = stats.loc["mean", met]
             summary[f"{met}_std"] = stats.loc["std", met]
-        # Add sum for confusion matrix columns, label as TP, FP, TN, FN
         for met, label in zip(["tp", "fp", "tn", "fn"], ["TP", "FP", "TN", "FN"]):
             if met in metrics_df.columns:
                 summary[label] = metrics_df[met].sum()
@@ -490,74 +545,71 @@ def _analyze_final_models(df, output_dir):
                     subject_summary[met] = metric_row[met]
                 subject_rows.append(subject_summary)
 
-    summary_csv = os.path.join(csv_root, "summary_final_models.csv")
     summary_df = pd.DataFrame(summary_rows)
+    subject_df = pd.DataFrame(subject_rows)
+
+    summary_csv = os.path.join(csv_root, "summary_final_models.csv")
     _save_csv_and_txt(summary_df, summary_csv, "Final Models Summary", output_root=output_dir)
     print(f"Resumo dos modelos finais salvo em: {summary_csv}")
 
-    scenario_dir = os.path.join(csv_root, "summary_final_models_by_scenario")
-    os.makedirs(scenario_dir, exist_ok=True)
-    for scenario in sorted(summary_df["scenario"].unique()):
-        scenario_df = summary_df[summary_df["scenario"] == scenario].reset_index(drop=True)
-        scenario_csv = os.path.join(scenario_dir, f"summary_final_models_{scenario}.csv")
-        _save_csv_and_txt(
-            scenario_df,
-            scenario_csv,
-            f"Final Models Summary - Scenario: {scenario}",
-            output_root=output_dir,
-        )
-        print(f"Resumo do scenario '{scenario}' salvo em: {scenario_csv}")
+    if not summary_df.empty and "scenario" in summary_df.columns:
+        scenario_dir = os.path.join(csv_root, "summary_final_models_by_scenario")
+        os.makedirs(scenario_dir, exist_ok=True)
+        for scenario in sorted(summary_df["scenario"].dropna().unique()):
+            scenario_df = summary_df[summary_df["scenario"] == scenario].reset_index(drop=True)
+            scenario_csv = os.path.join(scenario_dir, f"summary_final_models_{scenario}.csv")
+            _save_csv_and_txt(
+                scenario_df,
+                scenario_csv,
+                f"Final Models Summary - Scenario: {scenario}",
+                output_root=output_dir,
+            )
 
-    model_type_dir = os.path.join(csv_root, "summary_final_models_by_model_type")
-    os.makedirs(model_type_dir, exist_ok=True)
-    for model_type in sorted(summary_df["model_type"].unique()):
-        model_type_df = summary_df[summary_df["model_type"] == model_type].reset_index(drop=True)
-        model_type_csv = os.path.join(model_type_dir, f"summary_final_models_{model_type}.csv")
-        _save_csv_and_txt(
-            model_type_df,
-            model_type_csv,
-            f"Final Models Summary - Model Type: {model_type}",
-            output_root=output_dir,
-        )
-        print(f"Resumo do model_type '{model_type}' salvo em: {model_type_csv}")
+    if not summary_df.empty and "model_type" in summary_df.columns:
+        model_type_dir = os.path.join(csv_root, "summary_final_models_by_model_type")
+        os.makedirs(model_type_dir, exist_ok=True)
+        for model_type in sorted(summary_df["model_type"].dropna().unique()):
+            model_type_df = summary_df[summary_df["model_type"] == model_type].reset_index(drop=True)
+            model_type_csv = os.path.join(model_type_dir, f"summary_final_models_{model_type}.csv")
+            _save_csv_and_txt(
+                model_type_df,
+                model_type_csv,
+                f"Final Models Summary - Model Type: {model_type}",
+                output_root=output_dir,
+            )
 
     subject_summary_csv = os.path.join(csv_root, "summary_final_models_by_subject.csv")
-    subject_df = pd.DataFrame(subject_rows)
     _save_csv_and_txt(subject_df, subject_summary_csv, "Final Models Summary by Subject", output_root=output_dir)
     print(f"Resumo por subject salvo em: {subject_summary_csv}")
 
-    subject_dir = os.path.join(csv_root, "summary_final_models_by_subject")
-    os.makedirs(subject_dir, exist_ok=True)
-    for subject_id in sorted(subject_df["subject_id"].unique()):
-        subject_metrics_df = subject_df[subject_df["subject_id"] == subject_id].reset_index(drop=True)
-        subject_csv = os.path.join(subject_dir, f"summary_final_models_{subject_id}.csv")
-        _save_csv_and_txt(
-            subject_metrics_df,
-            subject_csv,
-            f"Final Models Summary - Subject: {subject_id}",
-            output_root=output_dir,
-        )
-        print(f"Resumo do subject '{subject_id}' salvo em: {subject_csv}")
-
-    # Export global summary metrics tables (standard and confusion matrix)
-    base_out = output_dir
-    standard_csv = os.path.join(base_out, "summary_metrics_standard.csv")
-    confusion_csv = os.path.join(base_out, "summary_metrics_confusion.csv")
-    if os.path.exists(standard_csv):
-        df_standard = pd.read_csv(standard_csv)
-        _save_csv_and_txt(df_standard, standard_csv, "Global Metrics (Standard)", output_root=output_dir)
-    if os.path.exists(confusion_csv):
-        df_confusion = pd.read_csv(confusion_csv)
-        _save_csv_and_txt(df_confusion, confusion_csv, "Global Metrics (Confusion Matrix)", output_root=output_dir)
+    if not subject_df.empty and "subject_id" in subject_df.columns:
+        subject_dir = os.path.join(csv_root, "summary_final_models_by_subject")
+        os.makedirs(subject_dir, exist_ok=True)
+        for subject_id in sorted(subject_df["subject_id"].dropna().unique()):
+            subject_metrics_df = subject_df[subject_df["subject_id"] == subject_id].reset_index(drop=True)
+            subject_csv = os.path.join(subject_dir, f"summary_final_models_{subject_id}.csv")
+            _save_csv_and_txt(
+                subject_metrics_df,
+                subject_csv,
+                f"Final Models Summary - Subject: {subject_id}",
+                output_root=output_dir,
+            )
 
     return summary_df, subject_df
 
 
 def _analyze_per_model(summary_df, subject_df, base_dir):
     """Write per-model summary bundles inside each model folder."""
-    for model_type in sorted(summary_df["model_type"].unique()):
+    if summary_df.empty or "model_type" not in summary_df.columns:
+        return
+
+    for model_type in sorted(summary_df["model_type"].dropna().unique()):
         model_summary_df = summary_df[summary_df["model_type"] == model_type].reset_index(drop=True)
-        model_subject_df = subject_df[subject_df["model_type"] == model_type].reset_index(drop=True)
+        model_subject_df = (
+            subject_df[subject_df["model_type"] == model_type].reset_index(drop=True)
+            if not subject_df.empty and "model_type" in subject_df.columns
+            else pd.DataFrame()
+        )
 
         model_analysis_root = os.path.join(base_dir, model_type, "analysis")
         model_csv_root = os.path.join(model_analysis_root, "csv")
@@ -571,39 +623,42 @@ def _analyze_per_model(summary_df, subject_df, base_dir):
             output_root=model_analysis_root,
         )
 
-        by_scenario_dir = os.path.join(model_csv_root, "summary_by_scenario")
-        os.makedirs(by_scenario_dir, exist_ok=True)
-        for scenario in sorted(model_summary_df["scenario"].unique()):
-            scenario_df = model_summary_df[model_summary_df["scenario"] == scenario].reset_index(drop=True)
-            scenario_csv = os.path.join(by_scenario_dir, f"summary_{model_type}_{scenario}.csv")
+        if not model_summary_df.empty and "scenario" in model_summary_df.columns:
+            by_scenario_dir = os.path.join(model_csv_root, "summary_by_scenario")
+            os.makedirs(by_scenario_dir, exist_ok=True)
+            for scenario in sorted(model_summary_df["scenario"].dropna().unique()):
+                scenario_df = model_summary_df[model_summary_df["scenario"] == scenario].reset_index(drop=True)
+                scenario_csv = os.path.join(by_scenario_dir, f"summary_{model_type}_{scenario}.csv")
+                _save_csv_and_txt(
+                    scenario_df,
+                    scenario_csv,
+                    f"Model Summary - {model_type} - Scenario: {scenario}",
+                    output_root=model_analysis_root,
+                )
+
+        if not model_subject_df.empty:
+            by_subject_csv = os.path.join(model_csv_root, f"summary_by_subject_{model_type}.csv")
             _save_csv_and_txt(
-                scenario_df,
-                scenario_csv,
-                f"Model Summary - {model_type} - Scenario: {scenario}",
+                model_subject_df,
+                by_subject_csv,
+                f"Model Subject Summary - {model_type}",
                 output_root=model_analysis_root,
             )
 
-        by_subject_csv = os.path.join(model_csv_root, f"summary_by_subject_{model_type}.csv")
-        _save_csv_and_txt(
-            model_subject_df,
-            by_subject_csv,
-            f"Model Subject Summary - {model_type}",
-            output_root=model_analysis_root,
-        )
+            if "subject_id" in model_subject_df.columns:
+                by_subject_dir = os.path.join(model_csv_root, "summary_by_subject")
+                os.makedirs(by_subject_dir, exist_ok=True)
+                for subject_id in sorted(model_subject_df["subject_id"].dropna().unique()):
+                    subject_metrics_df = model_subject_df[model_subject_df["subject_id"] == subject_id].reset_index(drop=True)
+                    subject_csv = os.path.join(by_subject_dir, f"summary_{model_type}_{subject_id}.csv")
+                    _save_csv_and_txt(
+                        subject_metrics_df,
+                        subject_csv,
+                        f"Model Subject Summary - {model_type} - Subject: {subject_id}",
+                        output_root=model_analysis_root,
+                    )
 
-        by_subject_dir = os.path.join(model_csv_root, "summary_by_subject")
-        os.makedirs(by_subject_dir, exist_ok=True)
-        for subject_id in sorted(model_subject_df["subject_id"].unique()):
-            subject_metrics_df = model_subject_df[model_subject_df["subject_id"] == subject_id].reset_index(drop=True)
-            subject_csv = os.path.join(by_subject_dir, f"summary_{model_type}_{subject_id}.csv")
-            _save_csv_and_txt(
-                subject_metrics_df,
-                subject_csv,
-                f"Model Subject Summary - {model_type} - Subject: {subject_id}",
-                output_root=model_analysis_root,
-            )
         print(f"Pacote de resumo por modelo salvo em: {model_analysis_root}")
-
 
 def _write_master_analysis_tex(output_dir):
     """Create a minimal master LaTeX file with required packages and \\input statements."""
@@ -654,13 +709,27 @@ def run_analyze(args):
     """Run global analysis focused on summary_final_models only."""
     df = _scan_output_dir(args.base_dir)
     print(f"Total de experimentos encontrados: {len(df)}")
+
     if df.empty:
         print("Nenhum experimento encontrado.")
         return
+
+    df = _ensure_aggregated(df)
+
+    valid_mask = df["all_metrics"].notna() | df["summary_metrics"].notna()
+    df = df[valid_mask].reset_index(drop=True)
+
+    print(f"Total de experimentos válidos após agregação: {len(df)}")
+    if df.empty:
+        print("Nenhum experimento agregado disponível para análise.")
+        return
+
     out = args.output_dir
     summary_df, subject_df = _analyze_final_models(df, out)
     _write_master_analysis_tex(out)
-    _analyze_per_model(summary_df, subject_df, args.base_dir)
+
+    if not summary_df.empty and not subject_df.empty:
+        _analyze_per_model(summary_df, subject_df, args.base_dir)
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -704,12 +773,13 @@ def build_parser():
     return parser
 
 
-def main():
+def main(args=None):
     Config.setup_device()
     Config.set_seed()
 
-    parser = build_parser()
-    args = parser.parse_args()
+    if args is None:
+        parser = build_parser()
+        args = parser.parse_args()
 
     dispatch = {
         "shap": run_shap,

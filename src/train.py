@@ -20,10 +20,15 @@ except ImportError:
 
 import optuna
 
-from neural_networks import CNN1DNet, MLPNet, LSTMNet, GRUNet
-from config import Config
-from test import save_results, save_results_classical, plot_loss_curve
-from sensor_fusion import sensors_from_scenario, apply_sensor_dropout_batch, zero_sensor_blocks
+from src.neural_networks import CNN1DNet, MLPNet, LSTMNet, GRUNet
+from src.config import Config
+from src.test import save_results, save_results_classical, plot_loss_curve
+from src.sensor_fusion import (
+    sensors_from_scenario,
+    apply_sensor_dropout_batch,
+    zero_sensor_blocks,
+    scenario_output_name,
+)
 
 
 def train(
@@ -388,18 +393,18 @@ def run_final_training(args):
     if sensor_dropout:
         print(f"Sensor dropout enabled: p={sensor_dropout_p:.3f}, max_off={sensor_dropout_max_off}")
 
-    scenario_out = scenario if loss_type == "weighted" else scenario + "_NW"
-    if model_type not in Config.CLASSICAL_MODELS:
-        scenario_out = f"{scenario_out}_IVG{inner_val_groups}"
-    if scale:
-        scenario_out = f"{scenario_out}_SC"
-    if no_mag:
-        scenario_out = f"{scenario_out}_NM"
-    if only_mag:
-        scenario_out = f"{scenario_out}_OM"
-    if sensor_dropout:
-        sensor_dropout_tag = str(sensor_dropout_p).replace('.', 'p')
-        scenario_out = f"{scenario_out}_SDP{sensor_dropout_tag}_M{sensor_dropout_max_off}"
+    scenario_out = scenario_output_name(
+        model_type,
+        scenario,
+        loss=loss_type,
+        inner_val_groups=inner_val_groups,
+        scale=scale,
+        no_mag=no_mag,
+        only_mag=only_mag,
+        sensor_dropout=sensor_dropout,
+        sensor_dropout_p=sensor_dropout_p,
+        sensor_dropout_max_off=sensor_dropout_max_off,
+    )
     base_out = Config.get_output_dir(model_type_arg, scenario_out)
     os.makedirs(base_out, exist_ok=True)
 
@@ -736,12 +741,13 @@ def build_parser():
 
 
 
-def main():
+def main(args=None):
     Config.setup_device()
     Config.set_seed()
 
-    parser = build_parser()
-    args = parser.parse_args()
+    if args is None:
+        parser = build_parser()
+        args = parser.parse_args()
     run_final_training(args)
 
 

@@ -145,16 +145,31 @@ def prepare_position_table(position: str, dataset_dir: str, dataset_root: str) -
         raise ValueError(f"Metadata for {dataset_dir} is missing columns: {missing}")
 
     keep_cols = ["index", "window_id"]
-    if "group_id" in meta.columns:
-        keep_cols.append("group_id")
-    if "y_true" in meta.columns:
-        keep_cols.append("y_true")
+    optional_cols = [
+        "group_id",
+        "y_true",
+        "window_start_ms",
+        "window_end_ms",
+        "exercise",
+        "with_rifle",
+        "occurrence_rank",
+        "subwindow_idx",
+    ]
+    for col in optional_cols:
+        if col in meta.columns:
+            keep_cols.append(col)
 
     meta = meta[keep_cols].rename(
         columns={
             "index": f"index_{position}",
             "group_id": f"group_id_{position}",
             "y_true": f"y_true_{position}",
+            "window_start_ms": f"window_start_ms_{position}",
+            "window_end_ms": f"window_end_ms_{position}",
+            "exercise": f"exercise_{position}",
+            "with_rifle": f"with_rifle_{position}",
+            "occurrence_rank": f"occurrence_rank_{position}",
+            "subwindow_idx": f"subwindow_idx_{position}",
         }
     )
 
@@ -198,6 +213,17 @@ def build_joined_index(
                 "Matched rows disagree on group_id across positions. Examples:\n"
                 f"{bad.to_string(index=False)}"
             )
+
+    for prefix, description in [("window_start_ms", "window_start_ms"), ("window_end_ms", "window_end_ms")]:
+        cols = [c for c in merged.columns if c.startswith(f"{prefix}_")]
+        if cols:
+            ok = merged[cols].nunique(axis=1) == 1
+            if not bool(ok.all()):
+                bad = merged.loc[~ok, ["window_id", *cols]].head(10)
+                raise ValueError(
+                    f"Matched rows disagree on {description} across positions. Examples:\n"
+                    f"{bad.to_string(index=False)}"
+                )
 
     if require_label_match and label_cols:
         label_ok = merged[label_cols].nunique(axis=1) == 1
@@ -310,6 +336,10 @@ def main() -> None:
             "y_true": labels,
         }
     )
+    for base_col in ["window_start_ms", "window_end_ms", "exercise", "with_rifle", "occurrence_rank", "subwindow_idx"]:
+        ref_col = select_reference_column(joined, base_col, positions) if any(c.startswith(f"{base_col}_") for c in joined.columns) else None
+        if ref_col:
+            metadata[base_col] = joined[ref_col].to_numpy()
     metadata.to_csv(os.path.join(data_out_dir, "metadata.csv"), index=False)
     metadata.to_csv(os.path.join(label_out_dir, "metadata.csv"), index=False)
 

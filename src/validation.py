@@ -4,6 +4,7 @@ import argparse
 import os
 import json
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -11,12 +12,13 @@ import torch.nn.functional as F
 import optuna
 import optuna.visualization as vis
 from sklearn.model_selection import LeaveOneGroupOut, GroupKFold, GroupShuffleSplit
-from sklearn.metrics import f1_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 from sklearn.preprocessing import StandardScaler
 
-from config import Config
-from training import train, create_model, _make_classical_model, drop_mag_channels, keep_only_mag_channels
-from test import save_results, save_results_classical, plot_loss_curve
+from src.config import Config
+from src.train import train, create_model, _make_classical_model, drop_mag_channels, keep_only_mag_channels
+from src.test import save_results, save_results_classical, plot_loss_curve
+from src.sensor_fusion import CANONICAL_SENSORS, scenario_output_name
 
 SCENARIO_CHOICES = list(Config.SCENARIOS.keys())
 
@@ -627,13 +629,15 @@ def run_nested_logo(args):
     no_mag = getattr(args, "no_mag", False)
     only_mag = getattr(args, "only_mag", False)
 
-    scenario_out = scenario if loss_type == "weighted" else scenario + "_NW"
-    if scale:
-        scenario_out = f"{scenario_out}_SC"
-    if no_mag:
-        scenario_out = f"{scenario_out}_NM"
-    if only_mag:
-        scenario_out = f"{scenario_out}_OM"
+    scenario_out = scenario_output_name(
+        model_type_arg,
+        scenario,
+        loss=loss_type,
+        inner_val_groups=1,
+        scale=scale,
+        no_mag=no_mag,
+        only_mag=only_mag,
+    )
     base_out = os.path.join(Config.get_output_dir(model_type_arg, scenario_out), "nested")
     os.makedirs(base_out, exist_ok=True)
 
@@ -833,8 +837,6 @@ def run_nested_logo(args):
 
             plot_loss_curve(train_losses, val_losses, fold_dir, fold_label)
 
-            import pandas as pd
-
             pd.DataFrame(
                 {
                     "epoch": range(1, len(train_losses) + 1),
@@ -858,9 +860,216 @@ def run_nested_logo(args):
     print(f"\nNested LOGO concluido! Resultados em: {base_out}")
 
 
+
+BASE_SCENARIOS = {
+    "chest": "chest_T",
+    "left": "left_T",
+    "right": "right_T",
+}
+
+
+def load_predictions_for_sensor(model, sensor_name, args):
+    scenario = BASE_SCENARIOS[sensor_name]
+    scenario_out = scenario_output_name(
+        model=model,
+        scenario=scenario,
+        loss=args.loss,
+        inner_val_groups=args.inner_val_groups,
+        scale=args.scale,
+        no_mag=args.no_mag,
+        only_mag=args.only_mag,
+    )
+
+    base_dir = os.path.join(Config.get_output_dir(model, scenario_out))
+    fold_files = sorted(
+        os.path.join(base_dir, fp)
+        for fp in os.listdir(base_dir)
+        if fp.startswith("fold_") and os.path.exists(os.path.join(base_dir, fp, "predictions.csv"))
+    ) if os.path.exists(base_dir) else []
+    if not fold_files:
+        raise FileNotFoundError(f"No predictions.csv files found for {sensor_name} at {base_dir}")
+
+    frames = []
+    for fold_dir in fold_files:
+        fp = os.path.join(fold_dir, "predictions.csv")
+        df = pd.read_csv(fp)
+        missing = {"window_id", "group_id", "y_true", "y_prob_1"} - set(df.columns)
+        if missing:
+            raise ValueError(f"{fp} is missing required columns: {sorted(missing)}")
+        keep_cols = ["window_id", "group_id", "y_true", "y_prob_1"]
+        if "sample_index" in df.columns:
+            keep_cols.append("sample_index")
+        df = df[keep_cols].copy()
+        df = df.rename(columns={"y_prob_1": f"p_{sensor_name}"})
+        if "sample_index" in df.columns:
+            df = df.rename(columns={"sample_index": f"sample_index_{sensor_name}"})
+        frames.append(df)
+
+    out = pd.concat(frames, ignore_index=True)
+    out = out.sort_values(["group_id", "window_id"]).drop_duplicates(["group_id", "window_id"], keep="last")
+    return out, scenario_out
+
+
+def report_window_id_overlap(sensor_frames):
+    sensor_names = list(sensor_frames.keys())
+    if len(sensor_names) < 2:
+        return
+    for i in range(len(sensor_names)):
+        for j in range(i + 1, len(sensor_names)):
+            a = sensor_names[i]
+            b = sensor_names[j]
+            a_ids = set(sensor_frames[a]["window_id"].astype(str))
+            b_ids = set(sensor_frames[b]["window_id"].astype(str))
+            common = len(a_ids & b_ids)
+            only_a = len(a_ids - b_ids)
+            only_b = len(b_ids - a_ids)
+            print(f"[window_id overlap] {a} vs {b}: common={common} only_{a}={only_a} only_{b}={only_b}")
+
+
+def build_multisensor_meta_dataframe(model, args):
+    merged = None
+    scenario_tags = {}
+    sensor_frames = {}
+    for sensor in CANONICAL_SENSORS:
+        df, tag = load_predictions_for_sensor(model, sensor, args)
+        scenario_tags[sensor] = tag
+        sensor_frames[sensor] = df
+        df = df.rename(columns={"y_true": f"y_true_{sensor}"})
+        merged = df if merged is None else merged.merge(df, on=["window_id", "group_id"], how="inner")
+    report_window_id_overlap(sensor_frames)
+    if merged is None or merged.empty:
+        raise ValueError("No aligned per-sensor predictions were found.")
+    ref_sensor = CANONICAL_SENSORS[0]
+    ref_col = f"y_true_{ref_sensor}"
+    for sensor in CANONICAL_SENSORS[1:]:
+        col = f"y_true_{sensor}"
+        mismatch = merged[ref_col].to_numpy() != merged[col].to_numpy()
+        if mismatch.any():
+            bad = merged.loc[mismatch, ["group_id", "window_id", ref_col, col]].head(20)
+            raise ValueError(
+                f"y_true mismatch between {ref_sensor} and {sensor} after window_id alignment.\nExamples:\n{bad.to_string(index=False)}"
+            )
+    merged["y_true"] = merged[ref_col].astype(int)
+    sort_cols = ["group_id", "window_id"]
+    if "sample_index_chest" in merged.columns:
+        sort_cols.append("sample_index_chest")
+    return merged.sort_values(sort_cols).reset_index(drop=True), scenario_tags
+
+
+def multisensor_conditions():
+    return {
+        "all_present": ["chest", "left", "right"],
+        "missing_chest": ["left", "right"],
+        "missing_left": ["chest", "right"],
+        "missing_right": ["chest", "left"],
+    }
+
+
+def compute_multisensor_metrics(y_true, y_prob, threshold=0.5):
+    y_pred = (np.asarray(y_prob) >= threshold).astype(int)
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+    return {
+        "Accuracy": accuracy_score(y_true, y_pred),
+        "Precision": precision_score(y_true, y_pred, zero_division=0),
+        "Recall": recall_score(y_true, y_pred, zero_division=0),
+        "f1": f1_score(y_true, y_pred, zero_division=0),
+        "tp": int(tp),
+        "fp": int(fp),
+        "tn": int(tn),
+        "fn": int(fn),
+    }, y_pred
+
+
+def save_multisensor_outputs(output_dir, condition_name, df, y_prob, threshold=0.5, prob_col="y_prob_fused", pred_col="y_pred_fused"):
+    os.makedirs(output_dir, exist_ok=True)
+    metrics, y_pred = compute_multisensor_metrics(df["y_true"].to_numpy(), y_prob, threshold=threshold)
+    per_sample = df.copy()
+    per_sample[prob_col] = y_prob
+    per_sample[pred_col] = y_pred
+    per_sample.to_csv(os.path.join(output_dir, f"predictions_{condition_name}.csv"), index=False)
+    pd.DataFrame([{"condition": condition_name, **metrics}]).to_csv(
+        os.path.join(output_dir, f"metrics_{condition_name}.csv"), index=False
+    )
+    return metrics
+
+
+def run_multisensor_ensemble(args):
+    df, scenario_tags = build_multisensor_meta_dataframe(args.model, args)
+    threshold = float(args.threshold)
+    output_dir = os.path.join(Config.get_output_dir(args.model, f"multisensor_ensemble_{args.tag}"))
+    os.makedirs(output_dir, exist_ok=True)
+    rows = []
+    for condition_name, available in multisensor_conditions().items():
+        probs = df[[f"p_{sensor}" for sensor in available]].mean(axis=1).to_numpy()
+        metrics = save_multisensor_outputs(output_dir, condition_name, df, probs, threshold=threshold)
+        rows.append({"method": "ensemble", "condition": condition_name, "available_sensors": ",".join(available), **metrics})
+    pd.DataFrame(rows).to_csv(os.path.join(output_dir, "summary_metrics.csv"), index=False)
+    with open(os.path.join(output_dir, "metadata.json"), "w", encoding="utf-8") as f:
+        json.dump({"model": args.model, "threshold": threshold, "source_scenarios": scenario_tags}, f, indent=2)
+    print(f"Ensemble results saved to: {output_dir}")
+
+
+def prepare_stacking_features(df, available):
+    return np.column_stack([
+        df["p_chest"].to_numpy() if "chest" in available else np.zeros(len(df), dtype=float),
+        df["p_left"].to_numpy() if "left" in available else np.zeros(len(df), dtype=float),
+        df["p_right"].to_numpy() if "right" in available else np.zeros(len(df), dtype=float),
+        np.full(len(df), 1.0 if "chest" in available else 0.0),
+        np.full(len(df), 1.0 if "left" in available else 0.0),
+        np.full(len(df), 1.0 if "right" in available else 0.0),
+    ])
+
+
+def run_multisensor_stacking(args):
+    from sklearn.linear_model import LogisticRegression
+
+    df, scenario_tags = build_multisensor_meta_dataframe(args.model, args)
+    output_dir = os.path.join(Config.get_output_dir(args.model, f"multisensor_stacking_{args.tag}"))
+    os.makedirs(output_dir, exist_ok=True)
+    threshold = float(args.threshold)
+    logo = LeaveOneGroupOut()
+    groups = df["group_id"].to_numpy()
+    y = df["y_true"].to_numpy().astype(int)
+    summary_rows = []
+
+    for condition_name, available in multisensor_conditions().items():
+        X = prepare_stacking_features(df, available)
+        all_probs = np.zeros(len(df), dtype=float)
+        all_preds = np.zeros(len(df), dtype=int)
+        fold_rows = []
+        for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
+            clf = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=Config.SEED + fold_idx)
+            clf.fit(X[train_idx], y[train_idx])
+            probs = clf.predict_proba(X[test_idx])[:, 1]
+            preds = (probs >= threshold).astype(int)
+            all_probs[test_idx] = probs
+            all_preds[test_idx] = preds
+            metrics, _ = compute_multisensor_metrics(y[test_idx], probs, threshold=threshold)
+            fold_rows.append({"fold": fold_idx + 1, "left_out_group": int(groups[test_idx][0]), **metrics})
+
+        out_df = df.copy()
+        out_df["y_prob_stacked"] = all_probs
+        out_df["y_pred_stacked"] = all_preds
+        out_df.to_csv(os.path.join(output_dir, f"predictions_{condition_name}.csv"), index=False)
+        pd.DataFrame(fold_rows).to_csv(os.path.join(output_dir, f"fold_metrics_{condition_name}.csv"), index=False)
+        metrics, _ = compute_multisensor_metrics(y, all_probs, threshold=threshold)
+        summary_rows.append({"method": "stacking", "condition": condition_name, "available_sensors": ",".join(available), **metrics})
+
+        final_clf = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=Config.SEED)
+        final_clf.fit(X, y)
+        import joblib
+        joblib.dump(final_clf, os.path.join(output_dir, f"stacker_{condition_name}.pkl"))
+
+    pd.DataFrame(summary_rows).to_csv(os.path.join(output_dir, "summary_metrics.csv"), index=False)
+    with open(os.path.join(output_dir, "metadata.json"), "w", encoding="utf-8") as f:
+        json.dump({"model": args.model, "threshold": threshold, "source_scenarios": scenario_tags}, f, indent=2)
+    print(f"Stacking results saved to: {output_dir}")
+
+
 def build_parser():
-    parser = argparse.ArgumentParser(description="Nested validation CLI")
-    parser.add_argument("-scenario", required=True, choices=SCENARIO_CHOICES)
+    parser = argparse.ArgumentParser(description="Nested validation and multisensor evaluation CLI")
+    parser.add_argument("-scenario", required=False, choices=SCENARIO_CHOICES)
     parser.add_argument(
         "--model",
         required=False,
@@ -869,41 +1078,48 @@ def build_parser():
     parser.add_argument("--n_trials", type=int, default=Config.OPTUNA_CONFIG["n_trials"])
     parser.add_argument("--epochs", type=int, default=Config.TRAINING_CONFIG["epochs"])
     parser.add_argument("--inner", choices=["kfold", "holdout", "none"], default="kfold")
-    parser.add_argument(
-        "--scale",
-        action="store_true",
-        default=False,
-        help="Fit a StandardScaler on each training split and apply it to validation/test splits.",
-    )
-    parser.add_argument(
-        "--no-mag",
-        dest="no_mag",
-        action="store_true",
-        default=False,
-        help="Drop the engineered magnitude channels before nested training.",
-    )
-    parser.add_argument(
-        "--only-mag",
-        dest="only_mag",
-        action="store_true",
-        default=False,
-        help="Keep only the engineered magnitude channels before nested training.",
-    )
-    parser.add_argument(
-        "--loss",
-        choices=["weighted", "unweighted"],
-        default="weighted",
-        help="Loss weighting for neural models: 'weighted' uses inverse-frequency class weights; 'unweighted' uses plain CrossEntropyLoss.",
-    )
+    parser.add_argument("--scale", action="store_true", default=False)
+    parser.add_argument("--no-mag", dest="no_mag", action="store_true", default=False)
+    parser.add_argument("--only-mag", dest="only_mag", action="store_true", default=False)
+    parser.add_argument("--loss", choices=["weighted", "unweighted"], default="weighted")
+    parser.add_argument("--multisensor-mode", choices=["ensemble", "stacking", "all"], default=None)
+    parser.add_argument("--inner-val-groups", type=int, default=1)
+    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--tag", default="default")
     return parser
 
 
-def main():
+
+def run_ensemble(**kwargs):
+    """Backward-compatible wrapper used by run.py."""
+    args = argparse.Namespace(**kwargs)
+    return run_multisensor_ensemble(args)
+
+
+def run_stacking(**kwargs):
+    """Backward-compatible wrapper used by run.py."""
+    args = argparse.Namespace(**kwargs)
+    return run_multisensor_stacking(args)
+
+def main(args=None):
     Config.setup_device()
     Config.set_seed()
 
     parser = build_parser()
-    args = parser.parse_args()
+    if args is None:
+        args = parser.parse_args()
+
+    if args.multisensor_mode:
+        if not args.model:
+            raise ValueError("--model is required when using --multisensor-mode")
+        if args.multisensor_mode in {"ensemble", "all"}:
+            run_multisensor_ensemble(args)
+        if args.multisensor_mode in {"stacking", "all"}:
+            run_multisensor_stacking(args)
+        return
+
+    if not args.scenario:
+        raise ValueError("-scenario is required unless --multisensor-mode is used")
     run_nested_logo(args)
 
 

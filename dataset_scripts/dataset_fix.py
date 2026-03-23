@@ -1,21 +1,3 @@
-"""
-Unified dataset fixer for fall-detect.
-
-This script aggregates the behaviors from:
-  - fix.py
-  - fix_timestamps.py
-  - _patch_remaining.py
-  - _fix_rowlevel.py
-  - _restore_truncated.py
-
-Examples:
-  python aggregate_fixes.py run-all --apply
-  python aggregate_fixes.py rename-labels --apply
-  python aggregate_fixes.py patch-wrong-year --apply
-  python aggregate_fixes.py row-level-fix --apply
-  python aggregate_fixes.py restore-truncated --apply
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -27,20 +9,17 @@ import sys
 from dataclasses import dataclass
 from typing import Iterable
 
-import pandas as pd
 import numpy as np
-
-OUTLIER_THRESHOLD = 10000
-
-OUTLIER_SENSOR_FILES = [
-    "acceleration",
-    "angular_speed",
-]
-
-OUTLIER_SENSOR_POSITIONS = ["RIGHT", "LEFT", "CHEST"]
+import pandas as pd
 
 CORRECT_YEAR = 2024
-
+OUTLIER_THRESHOLD = 10_000
+TIMESTAMP_FILES = (
+    ("sampling", ["beginning", "ending"]),
+    ("acceleration", ["timestamp"]),
+    ("angular_speed", ["timestamp"]),
+)
+TRUNCATED_CASES = (("ID5", "LEFT"), ("ID6", "RIGHT"))  # legacy recovery for datasets damaged by older fixes
 LABEL_MAPPING = {
     "ADL_11": "ADL_9",
     "ADL_12": "ADL_10",
@@ -48,22 +27,16 @@ LABEL_MAPPING = {
     "ADL_14": "ADL_12",
     "ADL_15": "ADL_13",
     "FALL_5": "FALL_4",
+    "FALL_6": "FALL_5",
     "ADL_11_R": "ADL_9_R",
     "ADL_12_R": "ADL_10_R",
     "ADL_13_R": "ADL_11_R",
     "ADL_14_R": "ADL_12_R",
     "ADL_15_R": "ADL_13_R",
     "FALL_5_R": "FALL_4_R",
-    "FALL_6": "FALL_5",
     "FALL_6_R": "FALL_5_R",
     "Rigth": "Right",
 }
-
-TIMESTAMP_FILES = (
-    ("sampling", ["beginning", "ending"]),
-    ("acceleration", ["timestamp"]),
-    ("angular_speed", ["timestamp"]),
-)
 
 
 @dataclass
@@ -73,87 +46,42 @@ class Summary:
     files_written: int = 0
 
 
+@dataclass
+class ChangeCount:
+    files_changed: int = 0
+    values_changed: int = 0
+
+    def add(self, files: int, values: int) -> None:
+        self.files_changed += files
+        self.values_changed += values
+
+
 def find_default_dataset_root(script_path: pathlib.Path) -> pathlib.Path:
     return (script_path.parent.parent / "dataset").resolve()
 
 
 def resolve_raw_root(dataset_root: pathlib.Path) -> pathlib.Path:
-    candidates = [dataset_root / "raw", dataset_root / "0_raw"]
-    for c in candidates:
-        if c.is_dir():
-            return c
-    raise FileNotFoundError(
-        f"Could not find raw root. Tried: {', '.join(str(x) for x in candidates)}"
-    )
+    for candidate in (dataset_root / "raw", dataset_root / "0_raw"):
+        if candidate.is_dir():
+            return candidate
+    raise FileNotFoundError("Could not find raw root under dataset/raw or dataset/0_raw")
 
-def _clean_outliers_in_df(df: pd.DataFrame, threshold: int) -> tuple[pd.DataFrame, int]:
-    time_cols = {"timestamp", "beginning", "ending"}
-    numeric_cols = [
-        col for col in df.select_dtypes(include=[np.number]).columns
-        if col not in time_cols
-    ]
-
-    changes = 0
-
-    for col in numeric_cols:
-        values = df[col].values
-        outlier_idx = np.where(np.abs(values) > threshold)[0]
-
-        for idx in outlier_idx:
-            if 0 < idx < len(values) - 1:
-                prev_val = values[idx - 1]
-                next_val = values[idx + 1]
-                interp = (prev_val + next_val) / 2
-                df.at[idx, col] = interp
-                changes += 1
-
-    return df, changes
-
-
-def clean_outliers(raw_root: pathlib.Path, dry_run: bool, backup: bool) -> tuple[int, int]:
-    files_changed = 0
-    values_changed = 0
-
-    for uid in iter_users(raw_root):
-        for pos in OUTLIER_SENSOR_POSITIONS:
-            base = raw_root / uid / pos
-            if not base.exists():
-                continue
-
-            for file in base.iterdir():
-                if not file.name.endswith(".csv") or file.name.endswith(".bak"):
-                    continue
-
-                if not any(sensor in file.name for sensor in OUTLIER_SENSOR_FILES):
-                    continue
-
-                df = pd.read_csv(file)
-                df, changes = _clean_outliers_in_df(df, OUTLIER_THRESHOLD)
-
-                if changes > 0:
-                    maybe_backup(file, backup, dry_run)
-                    if not dry_run:
-                        df.to_csv(file, index=False)
-                        files_changed += 1
-                    values_changed += changes
-                    print(f"  {file.name}: {changes} outlier value(s) fixed")
-
-    return files_changed, values_changed
 
 def iter_users(raw_root: pathlib.Path) -> list[str]:
     users = [p.name for p in raw_root.iterdir() if p.is_dir() and p.name.startswith("ID")]
-    return sorted(users, key=lambda x: int(x[2:]))
+    return sorted(users, key=lambda name: int(name[2:]))
 
 
-def maybe_backup(path: pathlib.Path, use_backup: bool, dry_run: bool) -> None:
-    if not use_backup:
+def sensor_positions(user_root: pathlib.Path) -> list[str]:
+    return sorted(p.name for p in user_root.iterdir() if p.is_dir())
+
+
+def maybe_backup(path: pathlib.Path, use_backup: bool, dry_run: bool, suffix: str = ".bak") -> None:
+    if not use_backup or dry_run:
         return
-    bak = path.with_suffix(path.suffix + ".bak")
-    if bak.exists():
-        return
-    if dry_run:
-        return
-    shutil.copy2(path, bak)
+    bak = pathlib.Path(str(path) + suffix)
+    if not bak.exists() and path.exists():
+        shutil.copy2(path, bak)
 
 
 def read_csv_rows(path: pathlib.Path) -> tuple[list[dict[str, str]], list[str]]:
@@ -175,50 +103,29 @@ def write_csv_rows(path: pathlib.Path, rows: list[dict[str, str]], fieldnames: l
 
 
 def _new_target_map(mapping: dict[str, str]) -> dict[str, str]:
-    return {v: k for k, v in mapping.items() if v not in mapping}
+    return {new: old for old, new in mapping.items() if new not in mapping}
 
 
 def _find_files_for_labels(dataset_root: pathlib.Path) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
-    csv_files = sorted(dataset_root.rglob("*_sampling.csv"))
-    ods_files = sorted(dataset_root.rglob("*_README.ods"))
-    return csv_files, ods_files
-
-
-def _check_csv_conflicts(csv_files: Iterable[pathlib.Path], mapping: dict[str, str]) -> list[tuple[pathlib.Path, str]]:
-    new_target_to_source = _new_target_map(mapping)
-    conflicts: list[tuple[pathlib.Path, str]] = []
-
-    for path in csv_files:
-        labels = {row.get("exercise", "") for row in csv.DictReader(io.StringIO(path.read_text(encoding="utf-8")))}
-        for target, source in new_target_to_source.items():
-            if source in labels and target in labels:
-                conflicts.append((path, f"{source} -> {target}"))
-    return conflicts
-
+    return sorted(dataset_root.rglob("*_sampling.csv")), sorted(dataset_root.rglob("*_README.ods"))
 
 def rename_labels(dataset_root: pathlib.Path, dry_run: bool) -> Summary:
     summary = Summary()
     csv_files, ods_files = _find_files_for_labels(dataset_root)
     print(f"Found {len(csv_files)} sampling CSV file(s) and {len(ods_files)} README ODS file(s).")
 
-    conflicts = _check_csv_conflicts(csv_files, LABEL_MAPPING)
-    if conflicts:
-        print("Conflict(s) detected in CSV labels. Aborting rename-labels.")
-        for path, desc in conflicts:
-            print(f"  {path.relative_to(dataset_root)}  {desc}")
-        return summary
-
     for path in csv_files:
-        rows, fieldnames = read_csv_rows(path)
-        changed = 0
-        for row in rows:
-            old = row.get("exercise", "")
-            new = LABEL_MAPPING.get(old, old)
-            if new != old:
-                row["exercise"] = new
-                changed += 1
+        df = pd.read_csv(path)
+        if "exercise" not in df.columns:
+            continue
+
+        old = df["exercise"].copy()
+        df["exercise"] = df["exercise"].replace(LABEL_MAPPING)
+        changed = int((old != df["exercise"]).sum())
+
         if changed:
-            if write_csv_rows(path, rows, fieldnames, dry_run):
+            if not dry_run:
+                df.to_csv(path, index=False)
                 summary.files_written += 1
             summary.csv_rows += changed
             print(f"  CSV {path.relative_to(dataset_root)}: {changed} row(s) changed")
@@ -234,16 +141,18 @@ def rename_labels(dataset_root: pathlib.Path, dry_run: bool) -> Summary:
     for path in ods_files:
         doc = opendoc.load(str(path))
         changed = 0
-        for sheet in doc.spreadsheet.getElementsByType(Table):
+
+        for sheet in doc.getElementsByType(Table):
             for row in sheet.getElementsByType(TableRow):
                 for cell in row.getElementsByType(TableCell):
                     for para in cell.getElementsByType(P):
-                        for node in [c for c in para.childNodes if c.nodeType == c.TEXT_NODE]:
-                            old = node.data
-                            new = LABEL_MAPPING.get(old, old)
-                            if new != old:
-                                node.data = new
-                                changed += 1
+                        for node in para.childNodes:
+                            if getattr(node, "nodeType", None) == node.TEXT_NODE:
+                                new = LABEL_MAPPING.get(node.data, node.data)
+                                if new != node.data:
+                                    node.data = new
+                                    changed += 1
+
         if changed:
             if not dry_run:
                 doc.save(str(path))
@@ -258,147 +167,113 @@ def _file_for(uid: str, pos: str, kind: str) -> str:
     return f"{uid}_{pos}_{kind}.csv"
 
 
-def _shift_timestamp_files(
+def _apply_timestamp_offset(
     base_dir: pathlib.Path,
     uid: str,
     pos: str,
     offset_ms: int,
     dry_run: bool,
     backup: bool,
-    only_wrong_year: bool = False,
+    wrong_year_only: bool,
 ) -> tuple[int, int]:
     files_changed = 0
     values_changed = 0
 
-    for kind, ts_cols in TIMESTAMP_FILES:
+    for kind, columns in TIMESTAMP_FILES:
         path = base_dir / _file_for(uid, pos, kind)
         if not path.exists():
             continue
 
-        rows, fieldnames = read_csv_rows(path)
+        df = pd.read_csv(path)
         changed_here = 0
-        for row in rows:
-            for col in ts_cols:
-                raw_val = (row.get(col) or "").strip()
-                if not raw_val:
-                    continue
-                ts = int(float(raw_val))
-                if only_wrong_year and pd.to_datetime(ts, unit="ms").year == CORRECT_YEAR:
-                    continue
-                row[col] = str(ts + offset_ms)
-                changed_here += 1
+
+        for col in columns:
+            if col not in df.columns:
+                continue
+
+            s = pd.to_numeric(df[col], errors="coerce")
+            valid = s.notna()
+
+            if wrong_year_only:
+                years = pd.to_datetime(s[valid], unit="ms", errors="coerce").dt.year
+                mask = pd.Series(False, index=df.index)
+                mask.loc[years.index] = years != CORRECT_YEAR
+            else:
+                mask = valid
+
+            count = int(mask.sum())
+            if count:
+                df.loc[mask, col] = (s.loc[mask] + offset_ms).astype("int64")
+                changed_here += count
 
         if changed_here:
             maybe_backup(path, backup, dry_run)
-            if write_csv_rows(path, rows, fieldnames, dry_run):
+            if not dry_run:
+                df.to_csv(path, index=False)
                 files_changed += 1
             values_changed += changed_here
-            print(f"  {path.name}: {changed_here} timestamp value(s) shifted")
+            scope = "wrong-year rows only" if wrong_year_only else "all rows"
+            print(f"  {path.name}: {changed_here} timestamp value(s) shifted ({scope})")
 
     return files_changed, values_changed
 
 
 def patch_wrong_year(raw_root: pathlib.Path, dry_run: bool, backup: bool) -> tuple[int, int]:
-    files_changed = 0
-    values_changed = 0
+    total = ChangeCount()
 
     for uid in iter_users(raw_root):
-        chest_path = raw_root / uid / "CHEST" / _file_for(uid, "CHEST", "sampling")
+        user_root = raw_root / uid
+        chest_path = user_root / "CHEST" / _file_for(uid, "CHEST", "sampling")
         if not chest_path.exists():
             continue
 
-        chest = pd.read_csv(chest_path)
-        chest_ref = int(chest["beginning"].iloc[0])
+        chest_beginning = pd.read_csv(chest_path, usecols=["beginning"])["beginning"]
+        chest_ref = int(chest_beginning.iloc[0])
         chest_year = pd.to_datetime(chest_ref, unit="ms").year
         if chest_year < CORRECT_YEAR:
             print(f"  WARNING: {uid}/CHEST year={chest_year}, skipping user")
             continue
 
-        for pos in ("LEFT", "RIGHT"):
-            samp_path = raw_root / uid / pos / _file_for(uid, pos, "sampling")
+        for pos in sensor_positions(user_root):
+            if pos == "CHEST":
+                continue
+
+            samp_path = user_root / pos / _file_for(uid, pos, "sampling")
             if not samp_path.exists():
                 continue
 
-            samp = pd.read_csv(samp_path)
-            first_ts = int(samp["beginning"].iloc[0])
-            year = pd.to_datetime(first_ts, unit="ms").year
-            if year >= CORRECT_YEAR:
+            beginning = pd.read_csv(samp_path, usecols=["beginning"])["beginning"]
+            years = pd.to_datetime(beginning, unit="ms", errors="coerce").dt.year
+            wrong_mask = years != CORRECT_YEAR
+            if not wrong_mask.any():
                 continue
 
-            offset = chest_ref - first_ts
-            before = pd.to_datetime(first_ts, unit="ms").date()
-            after = pd.to_datetime(first_ts + offset, unit="ms").date()
-            print(f"{uid}/{pos}: offset={offset:+d} ms ({before} -> {after})")
+            first_wrong = int(beginning[wrong_mask].iloc[0])
+            offset = chest_ref - first_wrong
+            mixed = bool(wrong_mask.sum() != len(beginning))
+            before = pd.to_datetime(first_wrong, unit="ms").date()
+            after = pd.to_datetime(first_wrong + offset, unit="ms").date()
+            mode = "wrong-year rows only" if mixed else "entire file"
+            print(f"{uid}/{pos}: offset={offset:+d} ms ({before} -> {after}) [{mode}]")
 
-            base = raw_root / uid / pos
-            f, v = _shift_timestamp_files(base, uid, pos, offset, dry_run, backup)
-            files_changed += f
-            values_changed += v
+            files, values = _apply_timestamp_offset(
+                user_root / pos,
+                uid,
+                pos,
+                offset,
+                dry_run,
+                backup,
+                wrong_year_only=mixed,
+            )
+            total.add(files, values)
 
-    return files_changed, values_changed
-
-
-def _offset_from_sampling_bak(raw_root: pathlib.Path, uid: str, pos: str) -> int:
-    cur_path = raw_root / uid / pos / _file_for(uid, pos, "sampling")
-    bak_path = pathlib.Path(str(cur_path) + ".bak")
-    if not bak_path.exists():
-        raise FileNotFoundError(f"Missing backup file for offset reconstruction: {bak_path}")
-    cur_ts = int(float(pd.read_csv(cur_path)["beginning"].iloc[0]))
-    bak_ts = int(float(pd.read_csv(bak_path)["beginning"].iloc[0]))
-    return cur_ts - bak_ts
-
-
-def row_level_fix(raw_root: pathlib.Path, dry_run: bool, backup: bool) -> tuple[int, int]:
-    files_changed = 0
-    values_changed = 0
-
-    # ID2/LEFT: undo over-shift for rows not in correct year
-    offset_id2 = _offset_from_sampling_bak(raw_root, "ID2", "LEFT")
-    print(f"ID2/LEFT row-level correction with offset {-offset_id2:+d} ms on wrong-year rows")
-    f, v = _shift_timestamp_files(
-        raw_root / "ID2" / "LEFT",
-        "ID2",
-        "LEFT",
-        -offset_id2,
-        dry_run,
-        backup,
-        only_wrong_year=True,
-    )
-    files_changed += f
-    values_changed += v
-
-    # ID7/LEFT: shift remaining wrong-year rows to correct year
-    chest_ref = int(
-        pd.read_csv(raw_root / "ID7" / "CHEST" / _file_for("ID7", "CHEST", "sampling"))["beginning"].iloc[0]
-    )
-    samp_id7 = pd.read_csv(raw_root / "ID7" / "LEFT" / _file_for("ID7", "LEFT", "sampling"))
-    wrong_rows = samp_id7[pd.to_datetime(samp_id7["beginning"], unit="ms").dt.year != CORRECT_YEAR]
-    if not wrong_rows.empty:
-        first_wrong = int(wrong_rows["beginning"].iloc[0])
-        offset_id7 = chest_ref - first_wrong
-        print(f"ID7/LEFT row-level correction with offset {offset_id7:+d} ms on wrong-year rows")
-        f, v = _shift_timestamp_files(
-            raw_root / "ID7" / "LEFT",
-            "ID7",
-            "LEFT",
-            offset_id7,
-            dry_run,
-            backup,
-            only_wrong_year=True,
-        )
-        files_changed += f
-        values_changed += v
-    else:
-        print("ID7/LEFT: no wrong-year rows found, nothing to patch")
-
-    return files_changed, values_changed
+    return total.files_changed, total.values_changed
 
 
 def restore_truncated(raw_root: pathlib.Path, dry_run: bool, backup: bool) -> tuple[int, int]:
-    files_changed = 0
-    values_changed = 0
+    total = ChangeCount()
 
-    for uid, pos in (("ID5", "LEFT"), ("ID6", "RIGHT")):
+    for uid, pos in TRUNCATED_CASES:
         base = raw_root / uid / pos
         ang_path = base / _file_for(uid, pos, "angular_speed")
         ang_bak = pathlib.Path(str(ang_path) + ".bak")
@@ -406,7 +281,7 @@ def restore_truncated(raw_root: pathlib.Path, dry_run: bool, backup: bool) -> tu
         samp_bak = pathlib.Path(str(samp_path) + ".bak")
 
         if not ang_bak.exists() or not samp_bak.exists():
-            print(f"{uid}/{pos}: required .bak files not found, skipping")
+            print(f"{uid}/{pos}: missing .bak files, skipping")
             continue
 
         cur_ts = int(float(pd.read_csv(samp_path)["beginning"].iloc[0]))
@@ -417,47 +292,93 @@ def restore_truncated(raw_root: pathlib.Path, dry_run: bool, backup: bool) -> tu
         rows, fieldnames = read_csv_rows(ang_bak)
         changed = 0
         for row in rows:
-            raw_val = (row.get("timestamp") or "").strip()
-            if not raw_val:
+            raw = (row.get("timestamp") or "").strip()
+            if not raw:
                 continue
-            row["timestamp"] = str(int(float(raw_val)) + offset)
+            row["timestamp"] = str(int(float(raw)) + offset)
             changed += 1
 
         if changed:
-            if backup:
-                trunc_bak = pathlib.Path(str(ang_path) + ".truncated.bak")
-                if not trunc_bak.exists() and not dry_run and ang_path.exists():
-                    shutil.copy2(ang_path, trunc_bak)
+            maybe_backup(ang_path, backup, dry_run, suffix=".truncated.bak")
             if write_csv_rows(ang_path, rows, fieldnames, dry_run):
-                files_changed += 1
-            values_changed += changed
+                total.files_changed += 1
+            total.values_changed += changed
             print(f"  {ang_path.name}: restored {len(rows)} row(s), shifted {changed} timestamp value(s)")
 
-    return files_changed, values_changed
+    return total.files_changed, total.values_changed
+
+
+def _clean_outliers_in_df(
+    df: pd.DataFrame, threshold: int
+) -> tuple[pd.DataFrame, int, pd.DataFrame]:
+    time_cols = {"timestamp", "beginning", "ending"}
+    numeric_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in time_cols]
+    if not numeric_cols:
+        return df, 0, pd.DataFrame()
+
+    num = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+    mask = num.abs() > threshold
+    changes = int(mask.sum().sum())
+
+    if changes == 0:
+        return df, 0, pd.DataFrame()
+
+    outliers = []
+    for col in numeric_cols:
+        bad_rows = df.loc[mask[col], ["timestamp"]].copy() if "timestamp" in df.columns else pd.DataFrame(index=df.index[mask[col]])
+        bad_rows["column"] = col
+        bad_rows["value"] = df.loc[mask[col], col].values
+        bad_rows["row_index"] = df.index[mask[col]]
+        outliers.append(bad_rows)
+
+    outliers_df = pd.concat(outliers, ignore_index=True) if outliers else pd.DataFrame()
+
+    num = num.mask(mask)
+    num = num.interpolate(method="linear", limit_direction="both", axis=0)
+    df[numeric_cols] = num
+    return df, changes, outliers_df
+
+
+def clean_outliers(raw_root: pathlib.Path, dry_run: bool, backup: bool) -> tuple[int, int]:
+    total = ChangeCount()
+
+    for uid in iter_users(raw_root):
+        for pos in sensor_positions(raw_root / uid):
+            base = raw_root / uid / pos
+            for kind in ("acceleration", "angular_speed"):
+                path = base / _file_for(uid, pos, kind)
+                if not path.exists():
+                    continue
+
+                df = pd.read_csv(path)
+                df, changes, outliers_df = _clean_outliers_in_df(df, OUTLIER_THRESHOLD)
+
+                if changes:
+                    print(f"\n  {path.name}: {changes} outlier value(s) found")
+                    print(outliers_df.to_string(index=False))
+
+                    maybe_backup(path, backup, dry_run)
+                    if not dry_run:
+                        df.to_csv(path, index=False)
+                        total.files_changed += 1
+                    total.values_changed += changes
+                    print(f"  {path.name}: {changes} outlier value(s) fixed")
+
+    return total.files_changed, total.values_changed
 
 
 def run_all(dataset_root: pathlib.Path, raw_root: pathlib.Path, dry_run: bool, backup: bool) -> None:
     print("== Step 1: rename labels ==")
-    r = rename_labels(dataset_root, dry_run=dry_run)
-    print(
-        f"Summary: csv_rows={r.csv_rows}, ods_cells={r.ods_cells}, files_written={r.files_written}\n"
-    )
+    renamed = rename_labels(dataset_root, dry_run=dry_run)
+    print(f"Summary: csv_rows={renamed.csv_rows}, ods_cells={renamed.ods_cells}, files_written={renamed.files_written}\n")
 
     print("== Step 2: patch wrong-year timestamps ==")
-    f, v = patch_wrong_year(raw_root, dry_run=dry_run, backup=backup)
-    print(f"Summary: files_changed={f}, values_changed={v}\n")
+    files, values = patch_wrong_year(raw_root, dry_run=dry_run, backup=backup)
+    print(f"Summary: files_changed={files}, values_changed={values}\n")
 
-    print("== Step 3: row-level special fixes ==")
-    f, v = row_level_fix(raw_root, dry_run=dry_run, backup=backup)
-    print(f"Summary: files_changed={f}, values_changed={v}\n")
-
-    print("== Step 4: restore truncated angular speed files ==")
-    f, v = restore_truncated(raw_root, dry_run=dry_run, backup=backup)
-    print(f"Summary: files_changed={f}, values_changed={v}\n")
-
-    print("== Step 5: clean outliers ==")
-    f, v = clean_outliers(raw_root, dry_run=dry_run, backup=backup)
-    print(f"Summary: files_changed={f}, values_changed={v}\n")
+    print("== Step 3: clean outliers ==")
+    files, values = clean_outliers(raw_root, dry_run=dry_run, backup=backup)
+    print(f"Summary: files_changed={files}, values_changed={values}\n")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -480,16 +401,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-backup",
         action="store_true",
-        help="Do not create .bak/.truncated.bak safety files where applicable.",
+        help="Do not create .bak safety files where applicable.",
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("rename-labels", help="Run label remap fix over sampling CSV and README ODS files")
-    sub.add_parser("patch-wrong-year", help="Patch wrong-year LEFT/RIGHT timestamp files")
-    sub.add_parser("row-level-fix", help="Apply row-level timestamp correction for known mixed-session files")
-    sub.add_parser("restore-truncated", help="Restore known truncated angular_speed files from .bak and reapply offset")
-    sub.add_parser("run-all", help="Execute all fixes in the expected order")
+    sub.add_parser("patch-wrong-year", help="Patch wrong-year timestamp files using CHEST as reference")
     sub.add_parser("clean-outliers", help="Fix extreme sensor outliers via interpolation")
+    sub.add_parser("run-all", help="Execute all fixes in the expected order")
     return parser
 
 
@@ -502,14 +421,11 @@ def main() -> int:
         print(f"ERROR: dataset root does not exist: {dataset_root}")
         return 1
 
-    if args.raw_root:
-        raw_root = pathlib.Path(args.raw_root).resolve()
-    else:
-        try:
-            raw_root = resolve_raw_root(dataset_root)
-        except FileNotFoundError as exc:
-            print(f"ERROR: {exc}")
-            return 1
+    try:
+        raw_root = pathlib.Path(args.raw_root).resolve() if args.raw_root else resolve_raw_root(dataset_root)
+    except FileNotFoundError as exc:
+        print(f"ERROR: {exc}")
+        return 1
 
     if not raw_root.is_dir():
         print(f"ERROR: raw root does not exist: {raw_root}")
@@ -517,39 +433,27 @@ def main() -> int:
 
     dry_run = not args.apply
     backup = not args.no_backup
-    mode = "APPLY" if args.apply else "DRY-RUN"
-
-    print(f"Mode: {mode}")
+    print(f"Mode: {'APPLY' if args.apply else 'DRY-RUN'}")
     print(f"dataset_root: {dataset_root}")
     print(f"raw_root:     {raw_root}")
 
     if args.command == "rename-labels":
-        r = rename_labels(dataset_root, dry_run=dry_run)
-        print(f"Summary: csv_rows={r.csv_rows}, ods_cells={r.ods_cells}, files_written={r.files_written}")
+        result = rename_labels(dataset_root, dry_run=dry_run)
+        print(f"Summary: csv_rows={result.csv_rows}, ods_cells={result.ods_cells}, files_written={result.files_written}")
         return 0
 
     if args.command == "patch-wrong-year":
-        f, v = patch_wrong_year(raw_root, dry_run=dry_run, backup=backup)
-        print(f"Summary: files_changed={f}, values_changed={v}")
+        files, values = patch_wrong_year(raw_root, dry_run=dry_run, backup=backup)
+        print(f"Summary: files_changed={files}, values_changed={values}")
         return 0
 
-    if args.command == "row-level-fix":
-        f, v = row_level_fix(raw_root, dry_run=dry_run, backup=backup)
-        print(f"Summary: files_changed={f}, values_changed={v}")
-        return 0
-
-    if args.command == "restore-truncated":
-        f, v = restore_truncated(raw_root, dry_run=dry_run, backup=backup)
-        print(f"Summary: files_changed={f}, values_changed={v}")
+    if args.command == "clean-outliers":
+        files, values = clean_outliers(raw_root, dry_run=dry_run, backup=backup)
+        print(f"Summary: files_changed={files}, values_changed={values}")
         return 0
 
     if args.command == "run-all":
         run_all(dataset_root, raw_root, dry_run=dry_run, backup=backup)
-        return 0
-
-    if args.command == "clean-outliers":
-        f, v = clean_outliers(raw_root, dry_run=dry_run, backup=backup)
-        print(f"Summary: files_changed={f}, values_changed={v}")
         return 0
 
     parser.print_help()

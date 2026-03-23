@@ -13,6 +13,8 @@ def sensors_from_scenario(scenario: str):
     for suffix in ("_SC", "_NM", "_OM"):
         if base.endswith(suffix):
             base = base[: -len(suffix)]
+    if "_SDP" in base:
+        base = base.split("_SDP", 1)[0]
     if base.endswith("_T") or base.endswith("_F"):
         base = base[:-2]
     parts = [p for p in base.split("_") if p and p not in {"cross", "sensor"}]
@@ -20,6 +22,32 @@ def sensors_from_scenario(scenario: str):
     if not sensors:
         raise ValueError(f"Could not infer sensors from scenario '{scenario}'")
     return sensors
+
+
+def scenario_output_name(
+    model,
+    scenario,
+    loss="weighted",
+    inner_val_groups=1,
+    scale=False,
+    no_mag=False,
+    only_mag=False,
+    sensor_dropout=False,
+    sensor_dropout_p=0.5,
+    sensor_dropout_max_off=1,
+):
+    scenario_out = scenario if loss == "weighted" else scenario + "_NW"
+    if model is not None and model not in {"RF", "SVM", "XGBoost", "CatBoost", "LogisticRegression"}:
+        scenario_out = f"{scenario_out}_IVG{max(int(inner_val_groups), 1)}"
+    if scale:
+        scenario_out = f"{scenario_out}_SC"
+    if no_mag:
+        scenario_out = f"{scenario_out}_NM"
+    if only_mag:
+        scenario_out = f"{scenario_out}_OM"
+    if sensor_dropout:
+        scenario_out = f"{scenario_out}_SDP{str(sensor_dropout_p).replace('.', 'p')}_M{int(sensor_dropout_max_off)}"
+    return scenario_out
 
 
 def infer_sensors_from_width(num_channels: int):
@@ -112,3 +140,12 @@ def expand_to_canonical(X, source_scenario: str, target_sensors=CANONICAL_SENSOR
 def availability_vector(active_sensors, target_sensors=CANONICAL_SENSORS):
     active = set(active_sensors)
     return np.array([1 if sensor in active else 0 for sensor in target_sensors], dtype=np.float32)
+
+
+def transfer_sensor_status(train_scenario: str, test_scenario: str):
+    train_sensors = sensors_from_scenario(train_scenario)
+    test_sensors = sensors_from_scenario(test_scenario)
+    return {
+        "missing": [s for s in train_sensors if s not in test_sensors],
+        "available": test_sensors,
+    }

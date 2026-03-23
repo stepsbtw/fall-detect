@@ -25,7 +25,8 @@ from sklearn.metrics import (
 from sklearn.model_selection import GroupShuffleSplit, LeaveOneGroupOut
 from sklearn.preprocessing import StandardScaler
 
-from config import Config
+from src.config import Config
+from src.sensor_fusion import expand_to_canonical, scenario_output_name, sensors_from_scenario, transfer_sensor_status
 
 
 def save_prediction_artifacts(
@@ -133,9 +134,12 @@ def run_cross_sensor_eval(
     scale=False,
     no_mag=False,
     only_mag=False,
+    inner_val_groups=1,
 ):
-    """Treina no sensor escolhido e testa automaticamente em todos os outros sensores definidos em Config.SCENARIOS (exceto o de treino)."""
-    from training import (
+    """Train with outer LOGO on one sensor and test the matching held-out subject on other sensors,
+    using strict alignment on (group_id, window_id) for the target test set.
+    """
+    from src.train import (
         _input_shape_from_data,
         _make_classical_model,
         create_model,
@@ -147,156 +151,70 @@ def run_cross_sensor_eval(
     Config.setup_device()
     Config.set_seed()
 
-    print(f"\n[Cross-Sensor Eval] Train: {train_scenario} | Model: {model_type} | Loss: {loss_type}")
+    print(
+        f"\n[Cross-Sensor Eval | LOGO] Train: {train_scenario} | Model: {model_type} | "
+        f"Loss: {loss_type} | inner_val_groups={inner_val_groups}"
+    )
+
     X_full = np.load(Config.get_data_file(train_scenario))
     y_full = np.load(Config.get_labels_file(train_scenario)).astype(np.int64)
+    groups_full = np.load(Config.get_groups_file(train_scenario))
+    window_ids_path = os.path.join(os.path.dirname(Config.get_labels_file(train_scenario)), "window_ids.npy")
+    window_ids_full = np.load(window_ids_path, allow_pickle=True) if os.path.exists(window_ids_path) else None
 
-    # Shuffle before splitting
-    rng = np.random.default_rng(Config.SEED)
-    indices = np.arange(len(X_full))
-    rng.shuffle(indices)
-    X_full = X_full[indices]
-    y_full = y_full[indices]
-
-    n_total = len(X_full)
-    n_trainval = int(0.8 * n_total)
-    n_test = n_total - n_trainval
-
-    X_trainval = X_full[:n_trainval]
-    y_trainval = y_full[:n_trainval]
-    X_test = X_full[n_trainval:]
-    y_test = y_full[n_trainval:]
-
-    # Split trainval into train and val (80/20 of trainval)
-    n_train = int(0.8 * n_trainval)
-    n_val = n_trainval - n_train
-    X_train = X_trainval[:n_train]
-    y_train = y_trainval[:n_train]
-    X_val = X_trainval[n_train:]
-    y_val = y_trainval[n_train:]
-    best_params = dict(Config.DEFAULT_PARAMS[model_type])
-    threshold = best_params.get("decision_threshold")
-    batch_size = Config.TRAINING_CONFIG.get("batch_size")
-    epochs = epochs if epochs is not None else Config.TRAINING_CONFIG.get("epochs")
+    if window_ids_full is None:
+        raise ValueError(
+            f"Cross-sensor aligned evaluation requires window_ids.npy in train scenario: {train_scenario}"
+        )
 
     if no_mag:
-        X_train = drop_mag_channels(X_train)
-        X_val = drop_mag_channels(X_val)
-        X_test = drop_mag_channels(X_test)
+        X_full = drop_mag_channels(X_full)
     if only_mag:
-        X_train = keep_only_mag_channels(X_train)
-        X_val = keep_only_mag_channels(X_val)
-        X_test = keep_only_mag_channels(X_test)
-    if scale:
-        n_tr, t_steps, n_ch = X_train.shape
-        feature_scaler = StandardScaler()
-        X_train = feature_scaler.fit_transform(X_train.reshape(-1, n_ch)).reshape(n_tr, t_steps, n_ch)
-        X_val = feature_scaler.transform(X_val.reshape(-1, n_ch)).reshape(X_val.shape[0], t_steps, n_ch)
-        X_test = feature_scaler.transform(X_test.reshape(-1, n_ch)).reshape(X_test.shape[0], t_steps, n_ch)
+        X_full = keep_only_mag_channels(X_full)
 
-    # Treinamento
-    if model_type in Config.CLASSICAL_MODELS:
-        X_train_flat = X_train.reshape(len(X_train), -1)
-        clf = _make_classical_model(model_type, best_params, y_train)
-        clf.fit(X_train_flat, y_train)
-        trained_model = clf
-        # Save classical model ONCE after training
-        train_base_out, model_save_dir = _cross_sensor_output_dirs(
-            train_scenario,
-            train_scenario,
-            model_type,
-            loss_type,
-            scale=scale,
-            no_mag=no_mag,
-            only_mag=only_mag,
-        )
-        os.makedirs(model_save_dir, exist_ok=True)
-        model_save_path = os.path.join(model_save_dir, f"model_{train_scenario}.pkl")
-        joblib.dump(trained_model, model_save_path)
-    else:
-        input_shape = _input_shape_from_data(X_train, model_type)
-        model = create_model(model_type, best_params, input_shape, Config.NUM_LABELS)
-        model.to(Config.DEVICE)
+    best_params = dict(Config.DEFAULT_PARAMS[model_type])
+    threshold = best_params.get("decision_threshold", 0.5)
+    batch_size = Config.TRAINING_CONFIG.get("batch_size", 32)
+    epochs = epochs if epochs is not None else Config.TRAINING_CONFIG.get("epochs")
 
-        if loss_type == "weighted":
-            class_counts = np.bincount(y_train, minlength=Config.NUM_LABELS)
-            class_counts = np.maximum(class_counts, 1)
-            class_weights = len(y_train) / (Config.NUM_LABELS * class_counts.astype(float))
-            criterion = torch.nn.CrossEntropyLoss(
-                weight=torch.tensor(class_weights, dtype=torch.float32, device=Config.DEVICE)
-            )
-        else:
-            criterion = torch.nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=best_params["learning_rate"])
-        scaler = torch.cuda.amp.GradScaler(enabled=Config.DEVICE.type == "cuda")
-        train_loader, val_loader, _ = _build_cross_sensor_loaders(
-            X_train, y_train, X_val, y_val, X_val, y_val, batch_size
-        )
+    unique_subjects = np.unique(groups_full)
+    print(f"Subjects (LOGO): {sorted(unique_subjects.tolist())} ({len(unique_subjects)} total)")
 
-        _, _, val_losses, train_losses = train(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            optimizer=optimizer,
-            criterion=criterion,
-            device=Config.DEVICE,
-            epochs=epochs,
-            early_stopping=True,
-            patience=Config.TRAINING_CONFIG.get("patience"),
-            scaler=scaler,
-        )
-        # Save loss curve using only the training sensor name (no _toALL suffix)
-        train_base_out, model_save_dir = _cross_sensor_output_dirs(
-            train_scenario,
-            train_scenario,
-            model_type,
-            loss_type,
-            scale=scale,
-            no_mag=no_mag,
-            only_mag=only_mag,
-        )
-        plot_loss_curve(train_losses, val_losses, train_base_out, f"{train_scenario}")
-        trained_model = model
-        # Save the model ONCE after training
-        os.makedirs(model_save_dir, exist_ok=True)
-        model_save_path = os.path.join(model_save_dir, f"model_{train_scenario}.pt")
-        torch.save(model.state_dict(), model_save_path)
-
-
-    # Teste em todos os sensores (exceto o de treino)
-    # Only allow: left_T -> chest_T and chest_T -> left_T
     allowed_pairs = {
         "left_T": ["chest_T", "right_T"],
         "right_T": ["chest_T", "left_T"],
         "chest_T": ["left_T", "right_T"],
-        # "chest_left_T": ["chest_right_T"],
-        # "chest_right_T": ["chest_left_T"],
-        #"chest_left_right_T": [],
     }
+
+    logo = LeaveOneGroupOut()
+
     for test_scenario in Config.SCENARIOS:
         if test_scenario == train_scenario:
             continue
         if train_scenario in allowed_pairs and test_scenario not in allowed_pairs[train_scenario]:
             continue
-        print(f"Testando modelo treinado em {train_scenario} no sensor {test_scenario}")
-        X_test_full = np.load(Config.get_data_file(test_scenario))
-        y_test_full = np.load(Config.get_labels_file(test_scenario)).astype(np.int64)
 
-        # Split de teste igual para todos: 20% finais do conjunto
-        n_total_test = len(X_test_full)
-        n_test = int(0.2 * n_total_test)
-        if n_test == 0:
-            n_test = 1
-        X_te = X_test_full[-n_test:]
-        y_te = y_test_full[-n_test:]
+        print(f"\n[Cross-Sensor Eval | LOGO] Train sensor: {train_scenario} -> Test sensor: {test_scenario}")
+        X_target = np.load(Config.get_data_file(test_scenario))
+        y_target = np.load(Config.get_labels_file(test_scenario)).astype(np.int64)
+        groups_target = np.load(Config.get_groups_file(test_scenario))
+        target_window_ids_path = os.path.join(os.path.dirname(Config.get_labels_file(test_scenario)), "window_ids.npy")
+        window_ids_target = np.load(target_window_ids_path, allow_pickle=True) if os.path.exists(target_window_ids_path) else None
+
+        if window_ids_target is None:
+            raise ValueError(
+                f"Cross-sensor aligned evaluation requires window_ids.npy in test scenario: {test_scenario}"
+            )
+
         if no_mag:
-            X_te = drop_mag_channels(X_te)
+            X_target = drop_mag_channels(X_target)
         if only_mag:
-            X_te = keep_only_mag_channels(X_te)
-        if scale:
-            n_te, t_steps, n_ch = X_te.shape
-            feature_scaler = StandardScaler()
-            X_te = feature_scaler.fit_transform(X_te.reshape(-1, n_ch)).reshape(n_te, t_steps, n_ch)
+            X_target = keep_only_mag_channels(X_target)
+
+        target_subjects = set(np.unique(groups_target).tolist())
+        missing_subjects = sorted(set(unique_subjects.tolist()) - target_subjects)
+        if missing_subjects:
+            print(f"[WARNING] Subjects present in {train_scenario} but missing in {test_scenario}: {missing_subjects}")
 
         base_out, model_out = _cross_sensor_output_dirs(
             train_scenario,
@@ -310,41 +228,348 @@ def run_cross_sensor_eval(
         os.makedirs(base_out, exist_ok=True)
         os.makedirs(model_out, exist_ok=True)
 
+        rows = []
+        n_folds = logo.get_n_splits(groups=groups_full)
+
+        window_ids_full_arr = np.asarray(window_ids_full, dtype=object)
+        window_ids_target_arr = np.asarray(window_ids_target, dtype=object)
+
+        for fold_idx, (train_idx, test_idx_source) in enumerate(logo.split(X_full, y_full, groups_full)):
+            left_out = groups_full[test_idx_source[0]]
+
+            if left_out not in target_subjects:
+                print(f"  Fold {fold_idx + 1}/{n_folds} - subject {left_out} missing in target scenario; skipping.")
+                continue
+
+            # source held-out windows for this subject
+            if len(test_idx_source) == 0:
+                print(f"  Fold {fold_idx + 1}/{n_folds} - no source samples for subject {left_out}; skipping.")
+                continue
+
+            # target windows for same held-out subject
+            test_idx_target_subject = np.where(groups_target == left_out)[0]
+            if len(test_idx_target_subject) == 0:
+                print(f"  Fold {fold_idx + 1}/{n_folds} - no target samples for subject {left_out}; skipping.")
+                continue
+
+            # strict alignment on (group_id, window_id)
+            src_df = pd.DataFrame({
+                "src_idx": test_idx_source,
+                "group_id": groups_full[test_idx_source],
+                "window_id": window_ids_full_arr[test_idx_source],
+                "y_src": y_full[test_idx_source],
+            })
+
+            tgt_df = pd.DataFrame({
+                "tgt_idx": test_idx_target_subject,
+                "group_id": groups_target[test_idx_target_subject],
+                "window_id": window_ids_target_arr[test_idx_target_subject],
+                "y_tgt": y_target[test_idx_target_subject],
+            })
+
+            aligned = (
+                src_df.merge(tgt_df, on=["group_id", "window_id"], how="inner")
+                .sort_values(["group_id", "window_id"])
+                .reset_index(drop=True)
+            )
+
+            if aligned.empty:
+                print(
+                    f"  Fold {fold_idx + 1}/{n_folds} - no aligned windows for subject {left_out} "
+                    f"between {train_scenario} and {test_scenario}; skipping."
+                )
+                continue
+
+            mismatch = aligned["y_src"].to_numpy() != aligned["y_tgt"].to_numpy()
+            if mismatch.any():
+                bad = aligned.loc[mismatch, ["group_id", "window_id", "y_src", "y_tgt"]].head(20)
+                raise ValueError(
+                    f"Label mismatch after cross-sensor alignment for subject {left_out}.\n"
+                    f"Examples:\n{bad.to_string(index=False)}"
+                )
+
+            test_idx_target = aligned["tgt_idx"].to_numpy(dtype=int)
+
+            fold_label = f"s{left_out}"
+            fold_dir = os.path.join(base_out, f"fold_{fold_label}")
+            model_fold_dir = os.path.join(model_out, f"fold_{fold_label}")
+            os.makedirs(fold_dir, exist_ok=True)
+            os.makedirs(model_fold_dir, exist_ok=True)
+
+            done_marker = os.path.join(fold_dir, "metrics.csv")
+            if os.path.exists(done_marker):
+                print(f"  Fold {fold_idx + 1}/{n_folds} - {fold_label} already done; skipping.")
+                row = pd.read_csv(done_marker).iloc[0].to_dict()
+                row["fold"] = fold_label
+                rows.append(row)
+                continue
+
+            print(
+                f"  Fold {fold_idx + 1}/{n_folds} - held-out subject: {left_out} | "
+                f"aligned windows: {len(test_idx_target)} "
+                f"(source={len(test_idx_source)}, target={len(test_idx_target_subject)})"
+            )
+
+            # optional audit trail
+            pd.DataFrame([{
+                "left_out_group": int(left_out),
+                "n_source_subject_windows": int(len(test_idx_source)),
+                "n_target_subject_windows": int(len(test_idx_target_subject)),
+                "n_aligned_windows": int(len(test_idx_target)),
+                "train_scenario": train_scenario,
+                "test_scenario": test_scenario,
+            }]).to_csv(os.path.join(fold_dir, "alignment_stats.csv"), index=False)
+
+            # training still uses only non-held-out source-subject data
+            X_train_all = X_full[train_idx]
+            y_train_all = y_full[train_idx]
+            groups_train = groups_full[train_idx]
+
+            inner_subjects = np.unique(groups_train)
+            n_val_groups = min(int(inner_val_groups), len(inner_subjects) - 1)
+            if n_val_groups <= 0:
+                raise ValueError("Cross-sensor LOGO requires at least 2 training groups in each outer fold.")
+
+            start_idx = fold_idx % len(inner_subjects)
+            val_subjects = [inner_subjects[(start_idx + k) % len(inner_subjects)] for k in range(n_val_groups)]
+            val_mask = np.isin(groups_train, val_subjects)
+
+            X_train = X_train_all[~val_mask]
+            y_train = y_train_all[~val_mask]
+            X_val = X_train_all[val_mask]
+            y_val = y_train_all[val_mask]
+
+            # target test set is now strictly aligned
+            X_te = X_target[test_idx_target]
+            y_te = y_target[test_idx_target]
+
+            if scale:
+                n_tr, t_steps, n_ch = X_train.shape
+                feature_scaler = StandardScaler()
+                X_train = feature_scaler.fit_transform(X_train.reshape(-1, n_ch)).reshape(n_tr, t_steps, n_ch)
+                X_val = feature_scaler.transform(X_val.reshape(-1, n_ch)).reshape(X_val.shape[0], t_steps, n_ch)
+                X_te = feature_scaler.transform(X_te.reshape(-1, n_ch)).reshape(X_te.shape[0], t_steps, n_ch)
+
+            if model_type in Config.CLASSICAL_MODELS:
+                X_train_flat = X_train.reshape(len(X_train), -1)
+                X_te_flat = X_te.reshape(len(X_te), -1)
+
+                clf = _make_classical_model(model_type, best_params, y_train)
+                clf.fit(X_train_flat, y_train)
+
+                save_results_classical(
+                    clf=clf,
+                    X_test_flat=X_te_flat,
+                    y_test=y_te,
+                    decision_threshold=threshold,
+                    i=fold_label,
+                    output_dir=fold_dir,
+                    model_output_dir=model_fold_dir,
+                    save_model=True,
+                    sample_indices=test_idx_target,
+                    group_ids=groups_target[test_idx_target],
+                    window_ids=window_ids_target_arr[test_idx_target],
+                    scenario_name=test_scenario,
+                    sensor_status=transfer_sensor_status(train_scenario, test_scenario),
+                )
+            else:
+                input_shape = _input_shape_from_data(X_train, model_type)
+                model = create_model(model_type, best_params, input_shape, Config.NUM_LABELS)
+                model.to(Config.DEVICE)
+
+                if loss_type == "weighted":
+                    class_counts = np.bincount(y_train, minlength=Config.NUM_LABELS)
+                    class_counts = np.maximum(class_counts, 1)
+                    class_weights = len(y_train) / (Config.NUM_LABELS * class_counts.astype(float))
+                    criterion = torch.nn.CrossEntropyLoss(
+                        weight=torch.tensor(class_weights, dtype=torch.float32, device=Config.DEVICE)
+                    )
+                else:
+                    criterion = torch.nn.CrossEntropyLoss()
+
+                optimizer = torch.optim.Adam(model.parameters(), lr=best_params["learning_rate"])
+                scaler = torch.cuda.amp.GradScaler(enabled=Config.DEVICE.type == "cuda")
+                train_loader, val_loader, test_loader = _build_cross_sensor_loaders(
+                    X_train, y_train, X_val, y_val, X_te, y_te, batch_size
+                )
+
+                _, _, val_losses, train_losses = train(
+                    model=model,
+                    train_loader=train_loader,
+                    val_loader=val_loader,
+                    optimizer=optimizer,
+                    criterion=criterion,
+                    device=Config.DEVICE,
+                    epochs=epochs,
+                    early_stopping=True,
+                    patience=Config.TRAINING_CONFIG.get("patience"),
+                    scaler=scaler,
+                )
+
+                plot_loss_curve(train_losses, val_losses, fold_dir, fold_label)
+
+                save_results(
+                    model=model,
+                    val_loader=test_loader,
+                    y_val_onehot=y_te,
+                    i=fold_label,
+                    decision_threshold=threshold,
+                    output_dir=fold_dir,
+                    device=Config.DEVICE,
+                    model_output_dir=model_fold_dir,
+                    save_model=True,
+                    sample_indices=test_idx_target,
+                    group_ids=groups_target[test_idx_target],
+                    window_ids=window_ids_target_arr[test_idx_target],
+                    scenario_name=test_scenario,
+                    sensor_status=transfer_sensor_status(train_scenario, test_scenario),
+                )
+
+            metrics_path = os.path.join(fold_dir, "metrics.csv")
+            if os.path.exists(metrics_path):
+                row = pd.read_csv(metrics_path).iloc[0].to_dict()
+                row["fold"] = fold_label
+                rows.append(row)
+
+        if rows:
+            pd.DataFrame(rows).to_csv(os.path.join(base_out, "summary_metrics.csv"), index=False)
+            print(f"Saved LOGO cross-sensor summary to: {os.path.join(base_out, 'summary_metrics.csv')}")
+
+    print(f"LOGO cross-sensor results saved for training sensor: {train_scenario}")
+
+
+def evaluate_padded_fused_model(
+    model_type,
+    train_scenario,
+    test_scenario,
+    loss="weighted",
+    inner_val_groups=1,
+    scale=False,
+    no_mag=False,
+    only_mag=False,
+    sensor_dropout=False,
+    sensor_dropout_p=0.5,
+    sensor_dropout_max_off=1,
+):
+    """Evaluate an already-trained fused model on a smaller scenario using zero-padded canonical sensor blocks."""
+    from src.train import create_model, _input_shape_from_data, _make_classical_model, drop_mag_channels, keep_only_mag_channels
+
+    train_out = scenario_output_name(
+        model_type,
+        train_scenario,
+        loss=loss,
+        inner_val_groups=inner_val_groups,
+        scale=scale,
+        no_mag=no_mag,
+        only_mag=only_mag,
+        sensor_dropout=sensor_dropout,
+        sensor_dropout_p=sensor_dropout_p,
+        sensor_dropout_max_off=sensor_dropout_max_off,
+    )
+    model_root = os.path.join(Config.get_models_dir(model_type, train_out))
+    output_root = os.path.join(Config.get_output_dir(model_type, f"padded_eval_{train_out}_on_{test_scenario}"))
+    os.makedirs(output_root, exist_ok=True)
+
+    X = np.load(Config.get_data_file(test_scenario))
+    y = np.load(Config.get_labels_file(test_scenario)).astype(np.int64)
+    groups = np.load(Config.get_groups_file(test_scenario))
+    window_ids_path = os.path.join(os.path.dirname(Config.get_labels_file(test_scenario)), "window_ids.npy")
+    window_ids = np.load(window_ids_path, allow_pickle=True) if os.path.exists(window_ids_path) else None
+
+    if no_mag:
+        X = drop_mag_channels(X)
+    if only_mag:
+        X = keep_only_mag_channels(X)
+
+    X = expand_to_canonical(X, test_scenario)
+    logo = LeaveOneGroupOut()
+    threshold = Config.DEFAULT_PARAMS[model_type].get("decision_threshold", 0.5)
+    rows = []
+
+    for _, (_, test_idx) in enumerate(logo.split(X, y, groups)):
+        left_out = groups[test_idx[0]]
+        fold_label = f"s{left_out}"
+        fold_dir = os.path.join(output_root, f"fold_{fold_label}")
+        os.makedirs(fold_dir, exist_ok=True)
+        X_test = X[test_idx]
+        y_test = y[test_idx]
+
+        if scale:
+            train_X = np.load(Config.get_data_file(train_scenario))
+            train_groups = np.load(Config.get_groups_file(train_scenario))
+            if no_mag:
+                train_X = drop_mag_channels(train_X)
+            if only_mag:
+                train_X = keep_only_mag_channels(train_X)
+            train_mask = train_groups != left_out
+            X_fit = train_X[train_mask]
+            n_tr, t_steps, n_ch = X_fit.shape
+            scaler = StandardScaler()
+            X_fit = scaler.fit_transform(X_fit.reshape(-1, n_ch)).reshape(n_tr, t_steps, n_ch)
+            X_test = scaler.transform(X_test.reshape(-1, n_ch)).reshape(X_test.shape[0], t_steps, n_ch)
+
         if model_type in Config.CLASSICAL_MODELS:
-            X_te_flat = X_te.reshape(len(X_te), -1)
+            model_path = os.path.join(model_root, f"fold_{fold_label}", f"model_{fold_label}.pkl")
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(model_path)
+            clf = joblib.load(model_path)
             save_results_classical(
-                clf=trained_model,
-                X_test_flat=X_te_flat,
-                y_test=y_te,
+                clf=clf,
+                X_test_flat=X_test.reshape(len(X_test), -1),
+                y_test=y_test,
                 decision_threshold=threshold,
-                i=f"{train_scenario}_to_{test_scenario}",
-                output_dir=base_out,
-                model_output_dir=model_out,
-                save_model=False,  # Do not save model again
+                i=fold_label,
+                output_dir=fold_dir,
+                save_model=False,
+                sample_indices=test_idx,
+                group_ids=groups[test_idx],
+                window_ids=window_ids[test_idx] if window_ids is not None else None,
+                scenario_name=test_scenario,
+                sensor_status=transfer_sensor_status(train_scenario, test_scenario),
             )
         else:
-            test_loader = torch.utils.data.DataLoader(
+            input_shape = _input_shape_from_data(X_test, model_type)
+            model = create_model(model_type, Config.DEFAULT_PARAMS[model_type], input_shape, Config.NUM_LABELS)
+            model_path = os.path.join(model_root, f"fold_{fold_label}", f"model_{fold_label}.pt")
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(model_path)
+            model = load_model_state(model, model_path, device=str(Config.DEVICE))
+            model.to(Config.DEVICE)
+            loader = torch.utils.data.DataLoader(
                 torch.utils.data.TensorDataset(
-                    torch.tensor(X_te, dtype=torch.float32),
-                    torch.tensor(y_te, dtype=torch.long),
+                    torch.tensor(X_test, dtype=torch.float32),
+                    torch.tensor(y_test, dtype=torch.long),
                 ),
-                batch_size=batch_size,
+                batch_size=Config.TRAINING_CONFIG["batch_size"],
                 shuffle=False,
             )
             save_results(
-                model=trained_model,
-                val_loader=test_loader,
-                y_val_onehot=None,
-                i=f"{train_scenario}_to_{test_scenario}",
+                model=model,
+                val_loader=loader,
+                y_val_onehot=y_test,
+                i=fold_label,
                 decision_threshold=threshold,
-                output_dir=base_out,
+                output_dir=fold_dir,
                 device=Config.DEVICE,
-                model_output_dir=model_out,
-                save_model=False,  # Do not save model again
+                save_model=False,
+                sample_indices=test_idx,
+                group_ids=groups[test_idx],
+                window_ids=window_ids[test_idx] if window_ids is not None else None,
                 scenario_name=test_scenario,
+                sensor_status=transfer_sensor_status(train_scenario, test_scenario),
             )
 
-    print(f"Strict sensor generalization results saved for training sensor: {train_scenario}")
+        metrics_path = os.path.join(fold_dir, "metrics.csv")
+        if os.path.exists(metrics_path):
+            row = pd.read_csv(metrics_path).iloc[0].to_dict()
+            row["fold"] = fold_label
+            rows.append(row)
+
+    if rows:
+        pd.DataFrame(rows).to_csv(os.path.join(output_root, "summary_metrics.csv"), index=False)
+    print(f"Padded fused evaluation saved to: {output_root}")
+    return output_root
+
 
 def save_results(
     model,
@@ -697,7 +922,7 @@ def plot_learning_curve(
         else:
             criterion = torch.nn.CrossEntropyLoss()
 
-        from training import train
+        from src.train import train
 
         batch_size = Config.TRAINING_CONFIG.get("batch_size", 32)
         train_loader = torch.utils.data.DataLoader(

@@ -29,6 +29,8 @@ class Config:
         # "left_F":             ["left",             "data_frequency_domain.npy", (230,  8)],
         "right_T":            ["right",            "data_time_domain.npy",      (460,  8)],
         # "right_F":            ["right",            "data_frequency_domain.npy", (230,  8)],
+        "left_right_T":       ["left_right",       "data_time_domain.npy",      (460, 16)],
+        # "left_right_F":       ["left_right",       "data_frequency_domain.npy", (230, 16)],
         "chest_left_T":       ["chest_left",       "data_time_domain.npy",      (460, 16)],
         # "chest_left_F":       ["chest_left",       "data_frequency_domain.npy", (230, 16)],
         "chest_right_T":      ["chest_right",      "data_time_domain.npy",      (460, 16)],
