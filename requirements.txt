@@ -11,8 +11,6 @@ plotly
 
 shap
 catboost
+xgboost
 
---index-url https://download.pytorch.org/whl/cu118
-torch
-tensorboard
-torchmetrics
+# install torch according to your gpu and cuda.

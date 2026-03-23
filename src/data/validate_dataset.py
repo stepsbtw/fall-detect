@@ -22,8 +22,8 @@ import sys
 import numpy as np
 
 EXPECTED_CHANNELS   = 8
-EXPECTED_ARRAY_SIZE = {"chest": 1100, "left": 460, "right": 460}
-EXPECTED_FREQ_SIZE  = {k: v // 2 for k, v in EXPECTED_ARRAY_SIZE.items()}
+EXPECTED_OUTPUT_SIZE = 460
+EXPECTED_FREQ_SIZE  = {k: v // 2 for k, v in EXPECTED_OUTPUT_SIZE.items()}
 VALID_LABELS        = {0, 1}
 VALID_GROUPS        = set(range(1, 16))
 
@@ -140,7 +140,7 @@ for position in args.positions:
     # ── 4. Window size ────────────────────────────────────────────────────
 
     print("\n-- Window dimensions --")
-    exp_t = EXPECTED_ARRAY_SIZE[position]
+    exp_t = EXPECTED_OUTPUT_SIZE[position]
     exp_f = EXPECTED_FREQ_SIZE[position]
 
     if time_arr is not None:

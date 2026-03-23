@@ -61,12 +61,24 @@ def fourier_transform(time_series):
     mean_time_series = np.mean(time_series)
 
     for i in time_series:
-        # Subtraction from the average to Remove the DC Component (Zero Frequency Component).
         data = i - mean_time_series
         altered_time_series.append(data)
     altered_time_series = np.array(altered_time_series)
 
     return np.abs(np.fft.fft(altered_time_series))
+
+def _resample_1d(data_array, target_size):
+    data = np.asarray(data_array, dtype=float)
+    if len(data) == target_size:
+        return data
+    if len(data) == 0:
+        raise ValueError("Cannot resample an empty array.")
+    if len(data) == 1:
+        return np.repeat(data, target_size)
+
+    old_x = np.linspace(0.0, 1.0, num=len(data))
+    new_x = np.linspace(0.0, 1.0, num=target_size)
+    return np.interp(new_x, old_x, data)
 
 def section_data_array(acc_dataframe, gyr_dataframe, i, use_in_media_generator=None):
     magacc = acc_dataframe.loc[acc_dataframe["sampling"] == i, "Magnitude"]
@@ -93,39 +105,84 @@ def section_data_array(acc_dataframe, gyr_dataframe, i, use_in_media_generator=N
     zgyr = gyr_dataframe.loc[gyr_dataframe["sampling"] == i, "wz"]
     zgyr = zgyr.reset_index(drop=True)
 
-    timestamp_acc = acc_dataframe.loc[acc_dataframe["sampling"]
-                                      == i, "timestamp"]
+    timestamp_acc = acc_dataframe.loc[acc_dataframe["sampling"] == i, "timestamp"]
     timestamp_acc = timestamp_acc.reset_index(drop=True)
-    timestamp_acc = timestamp_acc.drop(0, errors='ignore')
+    timestamp_acc = timestamp_acc.drop(0, errors="ignore")
     timestamp_acc = timestamp_acc.reset_index(drop=True)
 
-    timestamp_gyr = gyr_dataframe.loc[gyr_dataframe["sampling"]
-                                      == i, "timestamp"]
+    timestamp_gyr = gyr_dataframe.loc[gyr_dataframe["sampling"] == i, "timestamp"]
     timestamp_gyr = timestamp_gyr.reset_index(drop=True)
-    timestamp_gyr = timestamp_gyr.drop(0, errors='ignore')
+    timestamp_gyr = timestamp_gyr.drop(0, errors="ignore")
     timestamp_gyr = timestamp_gyr.reset_index(drop=True)
 
     if use_in_media_generator == "yes":
         return timestamp_acc, timestamp_gyr, magacc, xacc, yacc, zacc, maggyr, xgyr, ygyr, zgyr
     return magacc, xacc, yacc, zacc, maggyr, xgyr, ygyr, zgyr
 
-def add_data_arrays_to_time_and_frequency_data_lists(initial_index, final_index, array_size, data_array, data_array_list, fourier_transformed_data_array_list):
-    data_array = data_array[initial_index:final_index]
-    numpy_data_array = np.array(data_array)
-    numpy_data_array = np.expand_dims(numpy_data_array, axis=1)
-    data_array_list.append(numpy_data_array)
+def add_data_arrays_to_time_and_frequency_data_lists(
+    initial_index,
+    final_index,
+    array_size,
+    data_array,
+    data_array_list,
+    fourier_transformed_data_array_list,
+    output_size=None,
+):
+    data_array = data_array.iloc[initial_index:final_index] if hasattr(data_array, "iloc") else data_array[initial_index:final_index]
+    numpy_data_array = np.asarray(data_array, dtype=float)
 
-    transformed_data_array = fourier_transform(data_array)
-    transformed_data_array = transformed_data_array[:int(array_size / 2)]
-    numpy_transformed_data_array = np.array(transformed_data_array)
+    final_size = output_size if output_size is not None else array_size
+    if len(numpy_data_array) != final_size:
+        numpy_data_array = _resample_1d(numpy_data_array, final_size)
+
+    numpy_time = np.expand_dims(numpy_data_array, axis=1)
+    data_array_list.append(numpy_time)
+
+    transformed_data_array = fourier_transform(numpy_data_array)
+    transformed_data_array = transformed_data_array[: int(final_size / 2)]
     numpy_transformed_data_array = np.expand_dims(
-        numpy_transformed_data_array, axis=1)
+        np.asarray(transformed_data_array, dtype=float), axis=1
+    )
+    fourier_transformed_data_array_list.append(numpy_transformed_data_array)
+
+
+
+def add_timestamp_window_to_time_and_frequency_data_lists(
+    timestamps,
+    data_array,
+    window_start_ms,
+    window_end_ms,
+    data_array_list,
+    fourier_transformed_data_array_list,
+    output_size,
+):
+    timestamp_values = np.asarray(timestamps, dtype=float)
+    signal_values = np.asarray(data_array, dtype=float)
+
+    mask = (timestamp_values >= float(window_start_ms)) & (timestamp_values < float(window_end_ms))
+    window_values = signal_values[mask]
+    if len(window_values) == 0:
+        raise ValueError(
+            f"No samples found in timestamp window [{window_start_ms}, {window_end_ms})"
+        )
+
+    if len(window_values) != output_size:
+        window_values = _resample_1d(window_values, output_size)
+
+    numpy_time = np.expand_dims(window_values, axis=1)
+    data_array_list.append(numpy_time)
+
+    transformed_data_array = fourier_transform(window_values)
+    transformed_data_array = transformed_data_array[: int(output_size / 2)]
+    numpy_transformed_data_array = np.expand_dims(
+        np.asarray(transformed_data_array, dtype=float), axis=1
+    )
     fourier_transformed_data_array_list.append(numpy_transformed_data_array)
 
 def create_labels(activity):
     labels = {"ADL_1": 0, "ADL_2": 0, "ADL_3": 0, "ADL_4": 0, "ADL_5": 0, "ADL_6": 0, "ADL_7": 0, "ADL_8": 0,
-                               "ADL_9": 0, "ADL_10": 0, "ADL_11": 0, "ADL_12": 0, "ADL_13": 0, 
-                               "OM_1": 0, "OM_2": 0, "OM_3": 0, "OM_4": 0, "OM_5": 0, "OM_6": 0, "OM_7": 0, "OM_8": 0, "OM_9": 0, # OM_3 ao OM_8 sao possiveis falsos positivos!
+                               "ADL_9": 0, "ADL_10": 0, "ADL_11": 0, "ADL_12": 0, "ADL_13": 0,
+                               "OM_1": 0, "OM_2": 0, "OM_3": 0, "OM_4": 0, "OM_5": 0, "OM_6": 0, "OM_7": 0, "OM_8": 0, "OM_9": 0,
                                "FALL_1": 1, "FALL_2": 1, "FALL_3": 1, "FALL_4": 1, "FALL_5": 1}
 
     activity_without_rifle = activity.split("_with_rifle")[0]
@@ -136,8 +193,6 @@ def create_labels(activity):
 def add_labels(label, labels_list):
     labels_list.append(label)
 
-
-
 def validate_sampling_segments(
     acc_dataframe,
     gyr_dataframe,
@@ -145,14 +200,6 @@ def validate_sampling_segments(
     timestamp_tolerance_ms=2500,
     duration_tolerance_ratio=0.25,
 ):
-    """
-    Validate whether each sampling id in the manifest is consistent with the
-    sensor rows assigned to that id.
-
-    Returns a dataframe with one row per sampling id and boolean issue flags.
-    This is intentionally a validator, not a slicer: the training pipeline may
-    still rely on the sensor CSVs' ``sampling`` column for extraction.
-    """
     report_rows = []
 
     for _, row in sampling_dataframe.iterrows():
