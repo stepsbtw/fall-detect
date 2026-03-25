@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch.nn.functional as F
 import optuna
 import optuna.visualization as vis
+from optuna.samplers import TPESampler
 from sklearn.model_selection import LeaveOneGroupOut, GroupKFold, GroupShuffleSplit
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 from sklearn.preprocessing import StandardScaler
@@ -413,6 +414,7 @@ def objective(
                 shuffle=Config.TRAINING_CONFIG["shuffle"],
                 pin_memory=Config.TRAINING_CONFIG["pin_memory"],
                 num_workers=Config.TRAINING_CONFIG["num_workers"],
+                generator=getattr(Config, "TORCH_GENERATOR", None),
             )
 
             val_loader = DataLoader(
@@ -423,6 +425,7 @@ def objective(
                 batch_size=batch_size,
                 pin_memory=Config.TRAINING_CONFIG["pin_memory"],
                 num_workers=Config.TRAINING_CONFIG["num_workers"],
+                generator=getattr(Config, "TORCH_GENERATOR", None),
             )
 
             scaler = torch.cuda.amp.GradScaler(enabled=getattr(device, "type", str(device)) == "cuda")
@@ -573,6 +576,7 @@ def run_optuna(
             direction="maximize",
             study_name=study_name,
             storage=storage_url,
+            sampler=TPESampler(seed=Config.SEED),
             pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5, interval_steps=1),
             load_if_exists=True,
         )
@@ -799,6 +803,7 @@ def run_nested_logo(args):
                 shuffle=Config.TRAINING_CONFIG["shuffle"],
                 pin_memory=Config.TRAINING_CONFIG["pin_memory"],
                 num_workers=Config.TRAINING_CONFIG["num_workers"],
+                generator=getattr(Config, "TORCH_GENERATOR", None),
             )
             val_loader = DataLoader(
                 TensorDataset(torch.tensor(X_vl, dtype=torch.float32), torch.tensor(y_vl, dtype=torch.long)),
@@ -806,6 +811,7 @@ def run_nested_logo(args):
                 shuffle=False,
                 pin_memory=Config.TRAINING_CONFIG["pin_memory"],
                 num_workers=Config.TRAINING_CONFIG["num_workers"],
+                generator=getattr(Config, "TORCH_GENERATOR", None),
             )
             test_loader = DataLoader(
                 TensorDataset(
@@ -816,6 +822,7 @@ def run_nested_logo(args):
                 shuffle=False,
                 pin_memory=Config.TRAINING_CONFIG["pin_memory"],
                 num_workers=Config.TRAINING_CONFIG["num_workers"],
+                generator=getattr(Config, "TORCH_GENERATOR", None),
             )
 
             scaler = torch.cuda.amp.GradScaler(enabled=Config.DEVICE.type == "cuda")
@@ -1008,6 +1015,7 @@ def _fit_sensor_model_and_predict(sensor_bundle, train_idx, predict_idx, args, f
         shuffle=Config.TRAINING_CONFIG["shuffle"],
         pin_memory=Config.TRAINING_CONFIG["pin_memory"],
         num_workers=Config.TRAINING_CONFIG["num_workers"],
+        generator=getattr(Config, "TORCH_GENERATOR", None),
     )
     val_loader = DataLoader(
         TensorDataset(torch.tensor(X_val_fit, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)),
@@ -1015,6 +1023,7 @@ def _fit_sensor_model_and_predict(sensor_bundle, train_idx, predict_idx, args, f
         shuffle=False,
         pin_memory=Config.TRAINING_CONFIG["pin_memory"],
         num_workers=Config.TRAINING_CONFIG["num_workers"],
+        generator=getattr(Config, "TORCH_GENERATOR", None),
     )
     scaler = torch.cuda.amp.GradScaler(enabled=Config.DEVICE.type == "cuda")
     train(

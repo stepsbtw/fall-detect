@@ -1,18 +1,22 @@
 import os
+import random
 import torch
 import numpy as np
 
 class Config:
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    TORCH_GENERATOR = None
     TORCH_BACKENDS = {
         'cudnn_deterministic': True,
         'cudnn_benchmark': False,
         # 'cudnn_deterministic': False,
         # 'cudnn_benchmark': True,
-        'cuda_matmul_allow_tf32': True,
-        'cudnn_allow_tf32': True
+        'cuda_matmul_allow_tf32': False,
+        'cudnn_allow_tf32': False
     }
     SEED = 42
+    DETERMINISTIC = True
+    CUBLAS_WORKSPACE_CONFIG = ':16:8'
     ROOT_DIR = os.path.dirname(__file__)
     DATA_PATH = os.path.normpath(os.path.join(ROOT_DIR, "..", "dataset"))
     NUM_LABELS = 2
@@ -272,14 +276,21 @@ class Config:
     
     @classmethod
     def set_seed(cls, seed=None):
-        """Define seeds para reprodutibilidade"""
+        """Define seeds para reprodutibilidade."""
         if seed is None:
             seed = cls.SEED
+
+        os.environ["PYTHONHASHSEED"] = str(seed)
+        if cls.DETERMINISTIC:
+            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", cls.CUBLAS_WORKSPACE_CONFIG)
+
         torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
         np.random.seed(seed)
-        import random
         random.seed(seed)
+
         # For deterministic DataLoader shuffling
         cls.TORCH_GENERATOR = torch.Generator()
         cls.TORCH_GENERATOR.manual_seed(seed)

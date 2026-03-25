@@ -300,8 +300,11 @@ def keep_only_mag_channels(X):
 
 def make_sensor_dropout_transform(scenario, p=0.5, max_off=1, allow_no_dropout=True):
     sensors = sensors_from_scenario(scenario)
+    call_state = {"count": 0}
 
     def _transform(xb):
+        batch_seed = int(Config.SEED) + int(call_state["count"])
+        call_state["count"] += 1
         x_np = xb.detach().cpu().numpy()
         x_np, _ = apply_sensor_dropout_batch(
             x_np,
@@ -309,6 +312,7 @@ def make_sensor_dropout_transform(scenario, p=0.5, max_off=1, allow_no_dropout=T
             p=p,
             max_off=max_off,
             allow_no_dropout=allow_no_dropout,
+            seed=batch_seed,
         )
         return torch.tensor(x_np, dtype=xb.dtype)
 
