@@ -296,10 +296,12 @@ def run_cross_sensor_eval(
             os.makedirs(fold_dir, exist_ok=True)
             os.makedirs(model_fold_dir, exist_ok=True)
 
-            done_marker = os.path.join(fold_dir, "metrics.csv")
-            if os.path.exists(done_marker):
+            done_marker = os.path.join(fold_dir, "done.csv")
+            metrics_marker = os.path.join(fold_dir, "metrics.csv")
+            if os.path.exists(done_marker) or os.path.exists(metrics_marker):
                 print(f"  Fold {fold_idx + 1}/{n_folds} - {fold_label} already done; skipping.")
-                row = pd.read_csv(done_marker).iloc[0].to_dict()
+                marker_to_read = done_marker if os.path.exists(done_marker) else metrics_marker
+                row = pd.read_csv(marker_to_read).iloc[0].to_dict()
                 row["fold"] = fold_label
                 rows.append(row)
                 continue

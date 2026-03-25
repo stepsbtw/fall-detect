@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
@@ -367,6 +368,24 @@ def _input_shape_from_data(X, model_type):
     return (T, C)  # CNN1D and LSTM
 
 
+
+
+def _write_train_summary(base_out):
+    fold_dirs = sorted(
+        fp for fp in os.listdir(base_out)
+        if fp.startswith("fold_") and os.path.exists(os.path.join(base_out, fp, "metrics.csv"))
+    ) if os.path.exists(base_out) else []
+    rows = []
+    for fold_name in fold_dirs:
+        metrics_path = os.path.join(base_out, fold_name, "metrics.csv")
+        fold_row = pd.read_csv(metrics_path).iloc[0].to_dict()
+        fold_row["fold"] = fold_name.replace("fold_", "")
+        rows.append(fold_row)
+    if rows:
+        pd.DataFrame(rows).to_csv(os.path.join(base_out, "summary_metrics.csv"), index=False)
+        Config.mark_run_complete(base_out)
+        Config.clear_running_marker(base_out)
+
 def run_final_training(args):
     """Outer LOGO over all subjects using Config.DEFAULT_PARAMS, no HP search."""
     scenario = args.scenario
@@ -407,6 +426,10 @@ def run_final_training(args):
     )
     base_out = Config.get_output_dir(model_type_arg, scenario_out)
     os.makedirs(base_out, exist_ok=True)
+    if Config.is_run_complete(base_out):
+        print(f"Run already complete at: {base_out} - skipping.")
+        return
+    Config.set_running_marker(base_out)
 
     X = np.load(Config.get_data_file(scenario))
     y = np.load(Config.get_labels_file(scenario)).astype(np.int64)
@@ -434,8 +457,7 @@ def run_final_training(args):
             fold_dir = os.path.join(base_out, f"fold_s{left_out}")
             model_fold_dir = os.path.join(Config.get_models_dir(model_type_arg, scenario_out), f"fold_s{left_out}")
             fold_label = f"s{left_out}"
-            done_marker = os.path.join(fold_dir, "metrics.csv")
-            if os.path.exists(done_marker):
+            if Config.fold_done(fold_dir):
                 print(f"  Fold s{left_out} ja concluido - pulando.")
                 continue
             print(f"  Fold {fold_idx + 1}/{n_folds} - sujeito de teste: {left_out}")
@@ -513,8 +535,7 @@ def run_final_training(args):
         fold_dir = os.path.join(base_out, f"fold_s{left_out}")
         model_fold_dir = os.path.join(Config.get_models_dir(model_type_arg, scenario_out), f"fold_s{left_out}")
         fold_label = f"s{left_out}"
-        done_marker = os.path.join(fold_dir, "metrics.csv")
-        if os.path.exists(done_marker):
+        if Config.fold_done(fold_dir):
             print(f"\n  Fold s{left_out} ja concluido - pulando.")
             continue
         print(f"\n  Fold {fold_idx + 1}/{n_folds} - sujeito de teste: {left_out}")

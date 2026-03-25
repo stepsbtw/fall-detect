@@ -45,9 +45,9 @@ class Config:
     }
     
     TRAINING_CONFIG = {
-        'epochs': 500,
+        'epochs': 50,
         'early_stopping': True,
-        'patience': 30,
+        'patience': 10,
         'batch_size': 32,
         'num_workers': 0,
         'pin_memory': True,
@@ -283,3 +283,28 @@ class Config:
         # For deterministic DataLoader shuffling
         cls.TORCH_GENERATOR = torch.Generator()
         cls.TORCH_GENERATOR.manual_seed(seed)
+
+    @staticmethod
+    def is_run_complete(output_dir):
+        return os.path.exists(os.path.join(output_dir, "DONE"))
+
+    @staticmethod
+    def set_running_marker(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+        open(os.path.join(output_dir, "RUNNING"), "w").close()
+
+    @staticmethod
+    def clear_running_marker(output_dir):
+        path = os.path.join(output_dir, "RUNNING")
+        if os.path.exists(path):
+            os.remove(path)
+
+    @staticmethod
+    def set_done_marker(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+        open(os.path.join(output_dir, "DONE"), "w").close()
+        Config.clear_running_marker(output_dir)
+
+    @staticmethod
+    def fold_done(fold_dir):
+        return os.path.exists(os.path.join(fold_dir, "done.csv"))

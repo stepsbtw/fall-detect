@@ -16,7 +16,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precisio
 from sklearn.preprocessing import StandardScaler
 
 from src.config import Config
-from src.train import train, create_model, _make_classical_model, drop_mag_channels, keep_only_mag_channels
+from src.train import train, create_model, _make_classical_model, drop_mag_channels, keep_only_mag_channels, _input_shape_from_data
 from src.test import save_results, save_results_classical, plot_loss_curve
 from src.sensor_fusion import CANONICAL_SENSORS, scenario_output_name
 
@@ -868,6 +868,265 @@ BASE_SCENARIOS = {
 }
 
 
+def _select_validation_subjects(groups_train, fold_idx, inner_val_groups):
+    inner_subjects = np.unique(groups_train)
+    n_val_groups = min(int(inner_val_groups), max(len(inner_subjects) - 1, 0))
+    if n_val_groups <= 0:
+        raise ValueError("At least 2 training groups are required to create an inner validation split.")
+    start_idx = int(fold_idx) % len(inner_subjects)
+    return [inner_subjects[(start_idx + k) % len(inner_subjects)] for k in range(n_val_groups)]
+
+
+def _load_sensor_arrays(sensor_name, args):
+    scenario = BASE_SCENARIOS[sensor_name]
+    X = np.load(Config.get_data_file(scenario))
+    y = np.load(Config.get_labels_file(scenario)).astype(np.int64)
+    groups = np.load(Config.get_groups_file(scenario))
+    window_ids_path = os.path.join(os.path.dirname(Config.get_labels_file(scenario)), "window_ids.npy")
+    if not os.path.exists(window_ids_path):
+        raise FileNotFoundError(f"Missing window_ids.npy for scenario '{scenario}'")
+    window_ids = np.load(window_ids_path, allow_pickle=True)
+
+    if getattr(args, "no_mag", False):
+        X = drop_mag_channels(X)
+    if getattr(args, "only_mag", False):
+        X = keep_only_mag_channels(X)
+
+    return {
+        "sensor": sensor_name,
+        "scenario": scenario,
+        "X": X,
+        "y": y,
+        "groups": groups,
+        "window_ids": window_ids,
+    }
+
+
+def _predict_positive_proba_from_model(model, model_type, X, device=None):
+    if model_type in Config.CLASSICAL_MODELS:
+        if hasattr(model, "predict_proba"):
+            probs = model.predict_proba(X)
+            if probs.ndim == 2 and probs.shape[1] > 1:
+                return probs[:, 1].astype(float)
+            return probs.reshape(-1).astype(float)
+        if hasattr(model, "decision_function"):
+            scores = np.asarray(model.decision_function(X), dtype=float)
+            return 1.0 / (1.0 + np.exp(-scores))
+        raise ValueError(f"Model {model_type} does not expose predict_proba or decision_function")
+
+    device = device or Config.DEVICE
+    loader = DataLoader(
+        TensorDataset(torch.tensor(X, dtype=torch.float32), torch.zeros(len(X), dtype=torch.long)),
+        batch_size=Config.TRAINING_CONFIG.get("batch_size", 32),
+        shuffle=False,
+        pin_memory=Config.TRAINING_CONFIG["pin_memory"],
+        num_workers=Config.TRAINING_CONFIG["num_workers"],
+    )
+    model.eval()
+    probs = []
+    with torch.no_grad():
+        for xb, _ in loader:
+            xb = xb.to(device, non_blocking=True)
+            logits = model(xb)
+            batch_probs = torch.softmax(logits, dim=1)[:, 1].detach().cpu().numpy()
+            probs.append(batch_probs)
+    return np.concatenate(probs).astype(float)
+
+
+def _fit_sensor_model_and_predict(sensor_bundle, train_idx, predict_idx, args, fit_fold_idx):
+    model_type = args.model
+    X = sensor_bundle["X"]
+    y = sensor_bundle["y"]
+    groups = sensor_bundle["groups"]
+    best_params = Config.DEFAULT_PARAMS[model_type]
+
+    X_train_all = X[train_idx]
+    y_train_all = y[train_idx]
+    groups_train = groups[train_idx]
+
+    val_subjects = _select_validation_subjects(groups_train, fit_fold_idx, getattr(args, "inner_val_groups", 1))
+    val_mask = np.isin(groups_train, val_subjects)
+    train_mask = ~val_mask
+    if not bool(train_mask.any()):
+        raise ValueError("Validation split consumed all training samples.")
+
+    X_train = X_train_all[train_mask]
+    y_train = y_train_all[train_mask]
+    X_val = X_train_all[val_mask]
+    y_val = y_train_all[val_mask]
+    X_pred = X[predict_idx]
+
+    if model_type in Config.CLASSICAL_MODELS:
+        X_train_fit = X_train.reshape(len(X_train), -1)
+        X_pred_fit = X_pred.reshape(len(X_pred), -1)
+        if getattr(args, "scale", False):
+            scaler = StandardScaler()
+            X_train_fit = scaler.fit_transform(X_train_fit)
+            X_pred_fit = scaler.transform(X_pred_fit)
+        clf = _make_classical_model(model_type, best_params, y_train)
+        clf.fit(X_train_fit, y_train)
+        probs = _predict_positive_proba_from_model(clf, model_type, X_pred_fit)
+        return probs
+
+    X_val_fit = X_val
+    if getattr(args, "scale", False):
+        n_tr, t_steps, n_ch = X_train.shape
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train.reshape(-1, n_ch)).reshape(n_tr, t_steps, n_ch)
+        X_val_fit = scaler.transform(X_val.reshape(-1, n_ch)).reshape(X_val.shape[0], t_steps, n_ch)
+        X_pred = scaler.transform(X_pred.reshape(-1, n_ch)).reshape(X_pred.shape[0], t_steps, n_ch)
+
+    input_shape = Config.get_input_shape_dict(sensor_bundle["scenario"], model_type)[model_type]
+    if getattr(args, "no_mag", False) or getattr(args, "only_mag", False):
+        input_shape = _input_shape_from_data(X_train, model_type)
+
+    Config.set_seed(Config.SEED + int(fit_fold_idx))
+    model = create_model(model_type, best_params, input_shape, Config.NUM_LABELS)
+    model.to(Config.DEVICE)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=best_params["learning_rate"], weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=Config.TRAINING_CONFIG.get("patience"),
+        min_lr=1e-6,
+    )
+    if getattr(args, "loss", "weighted") == "weighted":
+        class_counts = np.bincount(y_train, minlength=Config.NUM_LABELS)
+        class_counts = np.maximum(class_counts, 1)
+        class_weights = len(y_train) / (Config.NUM_LABELS * class_counts.astype(float))
+        weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(Config.DEVICE)
+        criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+    else:
+        criterion = nn.CrossEntropyLoss()
+
+    batch_size = Config.TRAINING_CONFIG.get("batch_size", 32)
+    train_loader = DataLoader(
+        TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long)),
+        batch_size=batch_size,
+        shuffle=Config.TRAINING_CONFIG["shuffle"],
+        pin_memory=Config.TRAINING_CONFIG["pin_memory"],
+        num_workers=Config.TRAINING_CONFIG["num_workers"],
+    )
+    val_loader = DataLoader(
+        TensorDataset(torch.tensor(X_val_fit, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)),
+        batch_size=batch_size,
+        shuffle=False,
+        pin_memory=Config.TRAINING_CONFIG["pin_memory"],
+        num_workers=Config.TRAINING_CONFIG["num_workers"],
+    )
+    scaler = torch.cuda.amp.GradScaler(enabled=Config.DEVICE.type == "cuda")
+    train(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        criterion,
+        Config.DEVICE,
+        epochs=getattr(args, "epochs", Config.TRAINING_CONFIG.get("epochs")),
+        early_stopping=True,
+        patience=Config.TRAINING_CONFIG.get("patience"),
+        scaler=scaler,
+        scheduler=scheduler,
+    )
+    return _predict_positive_proba_from_model(model, model_type, X_pred, device=Config.DEVICE)
+
+
+def _merge_sensor_prediction_frames(sensor_frames):
+    merged = None
+    for sensor, df in sensor_frames.items():
+        current = df.rename(columns={"y_true": f"y_true_{sensor}"})
+        merged = current if merged is None else merged.merge(current, on=["window_id", "group_id"], how="inner")
+    if merged is None or merged.empty:
+        raise ValueError("No aligned per-sensor samples were found while building stacking metadata.")
+    ref_sensor = CANONICAL_SENSORS[0]
+    ref_col = f"y_true_{ref_sensor}"
+    for sensor in CANONICAL_SENSORS[1:]:
+        col = f"y_true_{sensor}"
+        mismatch = merged[ref_col].to_numpy() != merged[col].to_numpy()
+        if mismatch.any():
+            bad = merged.loc[mismatch, ["group_id", "window_id", ref_col, col]].head(20)
+            raise ValueError(
+                f"y_true mismatch between {ref_sensor} and {sensor} after window_id alignment.\nExamples:\n{bad.to_string(index=False)}"
+            )
+    merged["y_true"] = merged[ref_col].astype(int)
+    sort_cols = ["group_id", "window_id"]
+    sample_idx_col = "sample_index_chest"
+    if sample_idx_col in merged.columns:
+        sort_cols.append(sample_idx_col)
+    return merged.sort_values(sort_cols).reset_index(drop=True)
+
+
+def _collect_sensor_predictions(sensor_data, args, fit_specs, predict_subjects=None):
+    sensor_frames = {}
+    for sensor, bundle in sensor_data.items():
+        rows = []
+        for local_fit_idx, spec in enumerate(fit_specs):
+            train_idx = spec["train_idx"]
+            pred_idx = spec["predict_idx"]
+            probs = _fit_sensor_model_and_predict(
+                bundle,
+                train_idx=train_idx,
+                predict_idx=pred_idx,
+                args=args,
+                fit_fold_idx=spec.get("fit_fold_idx", local_fit_idx),
+            )
+            frame = pd.DataFrame(
+                {
+                    "window_id": bundle["window_ids"][pred_idx].astype(object),
+                    "group_id": bundle["groups"][pred_idx],
+                    "y_true": bundle["y"][pred_idx].astype(int),
+                    f"p_{sensor}": probs,
+                    f"sample_index_{sensor}": pred_idx,
+                }
+            )
+            rows.append(frame)
+        sensor_df = pd.concat(rows, ignore_index=True)
+        if predict_subjects is not None:
+            sensor_df = sensor_df[np.isin(sensor_df["group_id"], np.asarray(predict_subjects))].copy()
+        sensor_frames[sensor] = sensor_df.sort_values(["group_id", "window_id"]).reset_index(drop=True)
+    report_window_id_overlap(sensor_frames)
+    return _merge_sensor_prediction_frames(sensor_frames)
+
+
+def _build_honest_stacking_matrices(sensor_data, args, outer_train_groups, outer_test_group, outer_fold_idx):
+    outer_train_groups = np.asarray(sorted(np.unique(outer_train_groups)))
+    if outer_train_groups.size < 2:
+        raise ValueError("Need at least two outer-train groups to construct honest stacking features.")
+
+    full_groups = next(iter(sensor_data.values()))["groups"]
+
+    # Fast honest stacking:
+    # use a group-based inner holdout (default: 1 subject, matching the main training pipeline)
+    # to generate meta-train features, then refit on all outer-train groups for the outer test subject.
+    n_meta_groups = int(getattr(args, "inner_val_groups", 1) or 1)
+    n_meta_groups = max(1, min(n_meta_groups, outer_train_groups.size - 1))
+
+    rng = np.random.default_rng(Config.SEED + int(outer_fold_idx))
+    held_out_meta_groups = np.sort(rng.choice(outer_train_groups, size=n_meta_groups, replace=False))
+    base_train_groups = outer_train_groups[~np.isin(outer_train_groups, held_out_meta_groups)]
+
+    train_idx = np.where(np.isin(full_groups, base_train_groups))[0]
+    predict_idx = np.where(np.isin(full_groups, held_out_meta_groups))[0]
+    fit_specs_train = [{
+        "train_idx": train_idx,
+        "predict_idx": predict_idx,
+        "fit_fold_idx": outer_fold_idx * 100 + 1,
+    }]
+    train_df = _collect_sensor_predictions(sensor_data, args, fit_specs_train, predict_subjects=held_out_meta_groups)
+
+    full_train_idx = np.where(np.isin(full_groups, outer_train_groups))[0]
+    outer_test_idx = np.where(full_groups == outer_test_group)[0]
+    fit_specs_test = [{
+        "train_idx": full_train_idx,
+        "predict_idx": outer_test_idx,
+        "fit_fold_idx": outer_fold_idx * 100 + 99,
+    }]
+    test_df = _collect_sensor_predictions(sensor_data, args, fit_specs_test, predict_subjects=[outer_test_group])
+    return train_df, test_df
+
+
 def load_predictions_for_sensor(model, sensor_name, args):
     scenario = BASE_SCENARIOS[sensor_name]
     scenario_out = scenario_output_name(
@@ -962,6 +1221,9 @@ def multisensor_conditions():
         "missing_chest": ["left", "right"],
         "missing_left": ["chest", "right"],
         "missing_right": ["chest", "left"],
+        "only_chest": ["chest"],
+        "only_left": ["left"],
+        "only_right": ["right"],
     }
 
 
@@ -1023,49 +1285,112 @@ def prepare_stacking_features(df, available):
 
 def run_multisensor_stacking(args):
     from sklearn.linear_model import LogisticRegression
+    import joblib
 
-    df, scenario_tags = build_multisensor_meta_dataframe(args.model, args)
+    sensor_data = {sensor: _load_sensor_arrays(sensor, args) for sensor in CANONICAL_SENSORS}
+    scenario_tags = {sensor: bundle["scenario"] for sensor, bundle in sensor_data.items()}
     output_dir = os.path.join(Config.get_output_dir(args.model, f"multisensor_stacking_{args.tag}"))
     os.makedirs(output_dir, exist_ok=True)
     threshold = float(args.threshold)
-    logo = LeaveOneGroupOut()
-    groups = df["group_id"].to_numpy()
-    y = df["y_true"].to_numpy().astype(int)
+
+    reference_groups = sensor_data[CANONICAL_SENSORS[0]]["groups"]
+    all_groups = np.unique(reference_groups)
     summary_rows = []
+    condition_frames = {name: [] for name in multisensor_conditions()}
+    condition_fold_rows = {name: [] for name in multisensor_conditions()}
+
+    for outer_fold_idx, outer_test_group in enumerate(all_groups):
+        print(f"[stacking] outer fold {outer_fold_idx + 1}/{len(all_groups)} | left-out group={int(outer_test_group)}")
+        outer_train_groups = all_groups[all_groups != outer_test_group]
+        meta_train_df, meta_test_df = _build_honest_stacking_matrices(
+            sensor_data,
+            args,
+            outer_train_groups=outer_train_groups,
+            outer_test_group=outer_test_group,
+            outer_fold_idx=outer_fold_idx,
+        )
+
+        y_train = meta_train_df["y_true"].to_numpy().astype(int)
+        y_test = meta_test_df["y_true"].to_numpy().astype(int)
+
+        for condition_name, available in multisensor_conditions().items():
+            X_train = prepare_stacking_features(meta_train_df, available)
+            X_test = prepare_stacking_features(meta_test_df, available)
+            clf = LogisticRegression(
+                class_weight="balanced",
+                max_iter=1000,
+                random_state=Config.SEED + outer_fold_idx,
+            )
+            clf.fit(X_train, y_train)
+            probs = clf.predict_proba(X_test)[:, 1]
+            preds = (probs >= threshold).astype(int)
+            metrics, _ = compute_multisensor_metrics(y_test, probs, threshold=threshold)
+            out_df = meta_test_df.copy()
+            out_df["condition"] = condition_name
+            out_df["available_sensors"] = ",".join(available)
+            out_df["outer_fold"] = outer_fold_idx + 1
+            out_df["left_out_group"] = int(outer_test_group)
+            out_df["y_prob_stacked"] = probs
+            out_df["y_pred_stacked"] = preds
+            condition_frames[condition_name].append(out_df)
+            condition_fold_rows[condition_name].append({
+                "fold": outer_fold_idx + 1,
+                "left_out_group": int(outer_test_group),
+                "available_sensors": ",".join(available),
+                **metrics,
+            })
 
     for condition_name, available in multisensor_conditions().items():
-        X = prepare_stacking_features(df, available)
-        all_probs = np.zeros(len(df), dtype=float)
-        all_preds = np.zeros(len(df), dtype=int)
-        fold_rows = []
-        for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
-            clf = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=Config.SEED + fold_idx)
-            clf.fit(X[train_idx], y[train_idx])
-            probs = clf.predict_proba(X[test_idx])[:, 1]
-            preds = (probs >= threshold).astype(int)
-            all_probs[test_idx] = probs
-            all_preds[test_idx] = preds
-            metrics, _ = compute_multisensor_metrics(y[test_idx], probs, threshold=threshold)
-            fold_rows.append({"fold": fold_idx + 1, "left_out_group": int(groups[test_idx][0]), **metrics})
-
-        out_df = df.copy()
-        out_df["y_prob_stacked"] = all_probs
-        out_df["y_pred_stacked"] = all_preds
+        if not condition_frames[condition_name]:
+            raise ValueError(f"No stacking predictions were produced for condition '{condition_name}'")
+        out_df = pd.concat(condition_frames[condition_name], ignore_index=True)
+        out_df = out_df.sort_values(["group_id", "window_id"]).reset_index(drop=True)
         out_df.to_csv(os.path.join(output_dir, f"predictions_{condition_name}.csv"), index=False)
-        pd.DataFrame(fold_rows).to_csv(os.path.join(output_dir, f"fold_metrics_{condition_name}.csv"), index=False)
-        metrics, _ = compute_multisensor_metrics(y, all_probs, threshold=threshold)
-        summary_rows.append({"method": "stacking", "condition": condition_name, "available_sensors": ",".join(available), **metrics})
+        pd.DataFrame(condition_fold_rows[condition_name]).to_csv(
+            os.path.join(output_dir, f"fold_metrics_{condition_name}.csv"), index=False
+        )
+        metrics, _ = compute_multisensor_metrics(
+            out_df["y_true"].to_numpy().astype(int),
+            out_df["y_prob_stacked"].to_numpy(dtype=float),
+            threshold=threshold,
+        )
+        summary_rows.append({
+            "method": "stacking",
+            "condition": condition_name,
+            "available_sensors": ",".join(available),
+            **metrics,
+        })
 
+        full_meta_df = _collect_sensor_predictions(
+            sensor_data,
+            args,
+            fit_specs=[{
+                "train_idx": np.where(sensor_data[CANONICAL_SENSORS[0]]["groups"] != left_out)[0],
+                "predict_idx": np.where(sensor_data[CANONICAL_SENSORS[0]]["groups"] == left_out)[0],
+                "fit_fold_idx": 10_000 + idx,
+            } for idx, left_out in enumerate(all_groups)],
+            predict_subjects=all_groups,
+        )
+        X_full = prepare_stacking_features(full_meta_df, available)
+        y_full = full_meta_df["y_true"].to_numpy().astype(int)
         final_clf = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=Config.SEED)
-        final_clf.fit(X, y)
-        import joblib
+        final_clf.fit(X_full, y_full)
         joblib.dump(final_clf, os.path.join(output_dir, f"stacker_{condition_name}.pkl"))
 
     pd.DataFrame(summary_rows).to_csv(os.path.join(output_dir, "summary_metrics.csv"), index=False)
     with open(os.path.join(output_dir, "metadata.json"), "w", encoding="utf-8") as f:
-        json.dump({"model": args.model, "threshold": threshold, "source_scenarios": scenario_tags}, f, indent=2)
+        json.dump(
+            {
+                "model": args.model,
+                "threshold": threshold,
+                "source_scenarios": scenario_tags,
+                "stacking_strategy": "retrained_group_holdout",
+                "meta_features": ["p_chest", "p_left", "p_right", "flag_chest", "flag_left", "flag_right"],
+            },
+            f,
+            indent=2,
+        )
     print(f"Stacking results saved to: {output_dir}")
-
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Nested validation and multisensor evaluation CLI")
