@@ -1,12 +1,9 @@
-#!/usr/bin/env python3
-
 import argparse
 from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
 
-# Project imports
 from src.config import Config
 from src.train import main as train_main
 from src.validation import main as validation_main
@@ -15,9 +12,6 @@ from src.validation import run_ensemble, run_stacking
 from src.analysis import main as analysis_main
 
 
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
 CLASSICAL_MODELS = sorted(Config.CLASSICAL_MODELS)
 ALL_MODELS = list(Config.DEFAULT_PARAMS.keys())
 SCENARIOS = list(Config.SCENARIOS.keys())
@@ -102,16 +96,20 @@ def _fused_missing_output_dir(args):
         sensor_dropout_p=args.sensor_dropout_p,
         sensor_dropout_max_off=args.sensor_dropout_max_off,
     )
-    return Config.get_output_dir(args.model, f"padded_eval_{train_out}_on_{args.test_scenario}")
+    name = f"padded_eval_{train_out}_on_{args.test_scenario}"
+    if getattr(args, "calibration", "none") != "none":
+        name += f"_CAL_{args.calibration}"
+    if getattr(args, "tune_threshold", False):
+        name += f"_TT_{args.threshold_metric}"
+    else:
+        name += f"_TH_{str(float(args.threshold)).replace('.', 'p')}"
+    return Config.get_output_dir(args.model, name)
 
 
 def _multisensor_output_dirs(args):
     modes = [args.mode] if args.mode != "all" else ["ensemble", "stacking"]
     return [Config.get_output_dir(args.model, f"multisensor_{mode}_{args.tag}") for mode in modes]
 
-# ------------------------------------------------------------------
-# Training
-# ------------------------------------------------------------------
 def run_train(args):
     require_args(args, "model", "scenario")
     output_dir = _train_output_dir(args)
@@ -122,9 +120,6 @@ def run_train(args):
     train_main(args)
 
 
-# ------------------------------------------------------------------
-# Cross-sensor
-# ------------------------------------------------------------------
 def run_cross_sensor(args):
     require_args(args, "model", "scenario")
     output_dirs = _cross_sensor_output_dirs(args)
@@ -145,9 +140,6 @@ def run_cross_sensor(args):
     )
 
 
-# ------------------------------------------------------------------
-# Fused missing
-# ------------------------------------------------------------------
 def run_fused_missing(args):
     require_args(args, "model", "scenario", "test_scenario")
     output_dir = _fused_missing_output_dir(args)
@@ -168,12 +160,13 @@ def run_fused_missing(args):
         sensor_dropout=args.sensor_dropout,
         sensor_dropout_p=args.sensor_dropout_p,
         sensor_dropout_max_off=args.sensor_dropout_max_off,
+        threshold=args.threshold,
+        tune_threshold=args.tune_threshold,
+        threshold_metric=args.threshold_metric,
+        calibration=args.calibration,
     )
 
 
-# ------------------------------------------------------------------
-# Multisensor (ensemble / stacking)
-# ------------------------------------------------------------------
 def run_multisensor(args):
     require_args(args, "model")
     output_dirs = _multisensor_output_dirs(args)
@@ -202,9 +195,6 @@ def run_multisensor(args):
         run_stacking(**common_kwargs)
 
 
-# ------------------------------------------------------------------
-# Analysis
-# ------------------------------------------------------------------
 def run_analysis(args):
     print(f">> ANALYZE | base_dir={args.base_dir} | output_dir={args.output_dir}")
     analysis_args = Namespace(
@@ -215,9 +205,6 @@ def run_analysis(args):
     analysis_main(analysis_args)
 
 
-# ------------------------------------------------------------------
-# Main
-# ------------------------------------------------------------------
 def build_parser():
     parser = argparse.ArgumentParser()
 
@@ -258,6 +245,9 @@ def build_parser():
     parser.add_argument("--sensor_dropout_max_off", type=int, default=1)
 
     parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--tune_threshold", action="store_true")
+    parser.add_argument("--threshold_metric", choices=["f1", "balanced_accuracy", "youden"], default="f1")
+    parser.add_argument("--calibration", choices=["none", "temperature", "platt", "isotonic"], default="none")
 
     return parser
 
@@ -277,9 +267,6 @@ def main():
     if not any(selected_actions):
         parser.error("select at least one action: --train, --nested, --cross_sensor, --fused_missing, --multisensor, or --analyze")
 
-    # --------------------------------------------------------------
-    # Dispatch
-    # --------------------------------------------------------------
     if args.train:
         run_train(args)
 

@@ -1,12 +1,3 @@
-"""Unified analysis/output pipeline.
-
-Usage:
-    python analysis.py shap           -scenario <s> --model <m> [--background_size N] [--sample_size N]
-    python analysis.py learning_curve -scenario <s> [--model <m>] [--epochs N]
-    python analysis.py aggregate      -scenario <s> --model <m>
-    python analysis.py analyze        [--base_dir <dir>] [--output_dir <dir>]
-"""
-
 import argparse
 import os
 import glob
@@ -895,13 +886,13 @@ def build_parser():
         p.add_argument("-scenario", required=True, choices=SCENARIO_CHOICES)
         p.add_argument("--model", required=nn_required, choices=list(Config.DEFAULT_PARAMS.keys()))
 
-    # --- shap ---
+    # shap
     p_shap = subparsers.add_parser("shap", help="SHAP feature importance for the best model")
     add_scenario_nn(p_shap, nn_required=True)
     p_shap.add_argument("--background_size", type=int, default=100)
     p_shap.add_argument("--sample_size", type=int, default=200)
 
-    # --- learning_curve ---
+    # learning_curve
     p_lc = subparsers.add_parser("learning_curve", help="Generate learning curve")
     add_scenario_nn(p_lc)
     p_lc.add_argument("--epochs", type=int, default=Config.LEARNING_CURVE_CONFIG["epochs"], help="Épocas por fração")
@@ -912,14 +903,14 @@ def build_parser():
         help="Loss weighting for neural learning curves: 'weighted' uses inverse-frequency class weights; 'unweighted' uses plain CrossEntropyLoss.",
     )
 
-    # --- aggregate ---
+    # aggregate 
     p_agg = subparsers.add_parser("aggregate", help="Aggregate per-model metrics")
     p_agg.add_argument("-scenario", required=True,
                        help="Scenario variant name (e.g. chest_T, chest_T_IVG1_SC_NM)")
     p_agg.add_argument("--model", required=True,
                        choices=list(Config.DEFAULT_PARAMS.keys()))
 
-    # --- analyze ---
+    # analyze
     p_ana = subparsers.add_parser("analyze", help="Global analysis of all experiments")
     p_ana.add_argument("--base_dir", default="output", help="Root output directory to scan")
     p_ana.add_argument("--output_dir", default="output/analysis", help="Where to write analysis results")

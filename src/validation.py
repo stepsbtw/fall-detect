@@ -1,5 +1,3 @@
-"""Validation and hyperparameter-search routines."""
-
 import argparse
 import os
 import json

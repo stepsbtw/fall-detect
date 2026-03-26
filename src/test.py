@@ -1,5 +1,3 @@
-"""Testing, reporting and result persistence helpers."""
-
 import argparse
 import json
 import os
@@ -440,6 +438,168 @@ def run_cross_sensor_eval(
     print(f"LOGO cross-sensor results saved for training sensor: {train_scenario}")
 
 
+
+
+def _fused_eval_output_root(model_type, train_out, test_scenario, calibration="none", tune_threshold=False, threshold_metric="f1", threshold=0.5):
+    name = f"padded_eval_{train_out}_on_{test_scenario}"
+    if calibration != "none":
+        name += f"_CAL_{calibration}"
+    if tune_threshold:
+        name += f"_TT_{threshold_metric}"
+    else:
+        name += f"_TH_{str(float(threshold)).replace('.', 'p')}"
+    return os.path.join(Config.get_output_dir(model_type, name))
+
+
+def _collect_neural_outputs(model, loader, device):
+    model.eval()
+    logits_list, y_true = [], []
+    with torch.no_grad():
+        for xb, yb in loader:
+            xb = xb.to(device, non_blocking=True)
+            out = model(xb)
+            logits_list.append(out.detach().cpu().numpy())
+            y_true.extend(yb.numpy())
+    logits = np.concatenate(logits_list, axis=0) if logits_list else np.empty((0, Config.NUM_LABELS), dtype=float)
+    y_true = np.asarray(y_true)
+    probs = _softmax_np(logits)
+    return logits, probs, y_true
+
+
+def _softmax_np(logits):
+    logits = np.asarray(logits, dtype=float)
+    if logits.size == 0:
+        return np.empty((0, Config.NUM_LABELS), dtype=float)
+    shifted = logits - np.max(logits, axis=1, keepdims=True)
+    exps = np.exp(shifted)
+    return exps / np.clip(np.sum(exps, axis=1, keepdims=True), 1e-12, None)
+
+
+def _fit_temperature_from_logits(logits, y_true, max_iter=200, lr=0.01):
+    if len(logits) == 0:
+        return 1.0
+    device = torch.device("cpu")
+    logits_t = torch.tensor(logits, dtype=torch.float32, device=device)
+    y_t = torch.tensor(y_true, dtype=torch.long, device=device)
+    log_temp = torch.nn.Parameter(torch.zeros(1, device=device))
+    optimizer = torch.optim.LBFGS([log_temp], lr=lr, max_iter=max_iter)
+
+    def closure():
+        optimizer.zero_grad()
+        temp = torch.exp(log_temp).clamp(min=1e-3, max=100.0)
+        loss = F.cross_entropy(logits_t / temp, y_t)
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+    return float(torch.exp(log_temp).detach().cpu().item())
+
+
+def _fit_probability_calibrator(pos_probs, y_true, method):
+    pos_probs = np.asarray(pos_probs, dtype=float)
+    y_true = np.asarray(y_true, dtype=int)
+    if method == "platt":
+        from sklearn.linear_model import LogisticRegression
+        lr = LogisticRegression(random_state=Config.SEED, solver="lbfgs")
+        lr.fit(pos_probs.reshape(-1, 1), y_true)
+        return {"type": "platt", "model": lr}
+    if method == "isotonic":
+        from sklearn.isotonic import IsotonicRegression
+        iso = IsotonicRegression(out_of_bounds="clip")
+        iso.fit(pos_probs, y_true)
+        return {"type": "isotonic", "model": iso}
+    raise ValueError(f"Unsupported calibration method: {method}")
+
+
+def _apply_probability_calibrator(pos_probs, calibrator):
+    pos_probs = np.asarray(pos_probs, dtype=float)
+    model = calibrator["model"]
+    if calibrator["type"] == "platt":
+        pos = model.predict_proba(pos_probs.reshape(-1, 1))[:, 1]
+    elif calibrator["type"] == "isotonic":
+        pos = model.predict(pos_probs)
+    else:
+        raise ValueError(f"Unsupported calibrator type: {calibrator['type']}")
+    pos = np.clip(pos, 0.0, 1.0)
+    return np.column_stack([1.0 - pos, pos])
+
+
+def _threshold_score(y_true, y_prob_pos, threshold, metric):
+    y_true = np.asarray(y_true).astype(int)
+    y_pred = (np.asarray(y_prob_pos) >= float(threshold)).astype(int)
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+    tpr = tp / (tp + fn) if (tp + fn) else 0.0
+    tnr = tn / (tn + fp) if (tn + fp) else 0.0
+    if metric == "f1":
+        return f1_score(y_true, y_pred, pos_label=Config.METRICS_CONFIG["fall_class"], zero_division=0)
+    if metric == "balanced_accuracy":
+        return 0.5 * (tpr + tnr)
+    if metric == "youden":
+        return tpr + tnr - 1.0
+    raise ValueError(f"Unsupported threshold metric: {metric}")
+
+
+def _pick_best_threshold(y_true, y_prob_pos, metric="f1"):
+    candidates = np.round(np.arange(0.05, 0.951, 0.01), 2)
+    best_threshold = 0.5
+    best_score = float("-inf")
+    for thr in candidates:
+        score = _threshold_score(y_true, y_prob_pos, thr, metric)
+        if score > best_score + 1e-12 or (abs(score - best_score) <= 1e-12 and abs(thr - 0.5) < abs(best_threshold - 0.5)):
+            best_score = score
+            best_threshold = float(thr)
+    return float(best_threshold), float(best_score)
+
+
+def _save_eval_from_probs(
+    y_true,
+    y_probs,
+    decision_threshold,
+    output_dir,
+    i,
+    sample_indices=None,
+    group_ids=None,
+    window_ids=None,
+    scenario_name=None,
+    sensor_status=None,
+):
+    os.makedirs(output_dir, exist_ok=True)
+    y_probs = np.asarray(y_probs, dtype=float)
+    y_true = np.asarray(y_true, dtype=int)
+    nan_mask = ~np.isnan(y_probs).any(axis=1)
+    y_probs = y_probs[nan_mask]
+    y_true = y_true[nan_mask]
+    if sample_indices is not None:
+        sample_indices = np.asarray(sample_indices)[nan_mask]
+    if group_ids is not None:
+        group_ids = np.asarray(group_ids)[nan_mask]
+    if window_ids is not None:
+        window_ids = np.asarray(window_ids, dtype=object)[nan_mask]
+    if len(y_probs) == 0:
+        print(f"[WARNING] All predictions are NaN for {i}. Skipping metrics and plots.")
+        return
+    y_pred = (y_probs[:, 1] >= float(decision_threshold)).astype(int)
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+    save_metrics_csv(tp, fp, tn, fn, y_true, y_pred, output_dir)
+    plot_roc_curve(y_probs[:, 1], y_true, output_dir, i)
+    plot_precision_recall_curve(y_probs[:, 1], y_true, output_dir, i)
+    metrics = calculate_metrics(tp, tn, fp, fn, y_true, y_pred)
+    record_metrics(metrics, tp, tn, fp, fn, i, output_dir)
+    save_prediction_artifacts(
+        output_dir=output_dir,
+        y_true=y_true,
+        y_probs=y_probs,
+        y_pred=y_pred,
+        sample_indices=sample_indices,
+        group_ids=group_ids,
+        window_ids=window_ids,
+        scenario_name=scenario_name,
+        sensor_status=sensor_status,
+    )
+
+
 def evaluate_padded_fused_model(
     model_type,
     train_scenario,
@@ -452,6 +612,10 @@ def evaluate_padded_fused_model(
     sensor_dropout=False,
     sensor_dropout_p=0.5,
     sensor_dropout_max_off=1,
+    threshold=0.5,
+    tune_threshold=False,
+    threshold_metric="f1",
+    calibration="none",
 ):
     """Evaluate a fused model on valid missing-sensor subsets of its training sensor set."""
     from src.train import create_model, _input_shape_from_data, drop_mag_channels, keep_only_mag_channels
@@ -459,7 +623,6 @@ def evaluate_padded_fused_model(
     train_sensors = tuple(sensors_from_scenario(train_scenario))
     test_sensors = tuple(sensors_from_scenario(test_scenario))
     train_shape = Config.SCENARIOS[train_scenario][2]
-    test_shape = Config.SCENARIOS[test_scenario][2]
 
     allowed_targets = [
         scenario_name
@@ -475,6 +638,9 @@ def evaluate_padded_fused_model(
             f"Allowed test scenarios for {train_scenario}: {allowed_targets}"
         )
 
+    if calibration == "temperature" and model_type in Config.CLASSICAL_MODELS:
+        raise ValueError("temperature calibration is only supported for neural models")
+
     train_out = scenario_output_name(
         model_type,
         train_scenario,
@@ -488,56 +654,104 @@ def evaluate_padded_fused_model(
         sensor_dropout_max_off=sensor_dropout_max_off,
     )
     model_root = os.path.join(Config.get_models_dir(model_type, train_out))
-    output_root = os.path.join(Config.get_output_dir(model_type, f"padded_eval_{train_out}_on_{test_scenario}"))
+    output_root = _fused_eval_output_root(
+        model_type=model_type,
+        train_out=train_out,
+        test_scenario=test_scenario,
+        calibration=calibration,
+        tune_threshold=tune_threshold,
+        threshold_metric=threshold_metric,
+        threshold=threshold,
+    )
     os.makedirs(output_root, exist_ok=True)
 
-    X = np.load(Config.get_data_file(test_scenario))
-    y = np.load(Config.get_labels_file(test_scenario)).astype(np.int64)
-    groups = np.load(Config.get_groups_file(test_scenario))
-    window_ids_path = os.path.join(os.path.dirname(Config.get_labels_file(test_scenario)), "window_ids.npy")
-    window_ids = np.load(window_ids_path, allow_pickle=True) if os.path.exists(window_ids_path) else None
+    X_test_full = np.load(Config.get_data_file(test_scenario))
+    y_test_full = np.load(Config.get_labels_file(test_scenario)).astype(np.int64)
+    groups_test_full = np.load(Config.get_groups_file(test_scenario))
+    window_ids_test_path = os.path.join(os.path.dirname(Config.get_labels_file(test_scenario)), "window_ids.npy")
+    window_ids_test_full = np.load(window_ids_test_path, allow_pickle=True) if os.path.exists(window_ids_test_path) else None
+
+    X_train_full = np.load(Config.get_data_file(train_scenario))
+    y_train_full = np.load(Config.get_labels_file(train_scenario)).astype(np.int64)
+    groups_train_full = np.load(Config.get_groups_file(train_scenario))
 
     if no_mag:
-        X = drop_mag_channels(X)
+        X_test_full = drop_mag_channels(X_test_full)
+        X_train_full = drop_mag_channels(X_train_full)
     if only_mag:
-        X = keep_only_mag_channels(X)
+        X_test_full = keep_only_mag_channels(X_test_full)
+        X_train_full = keep_only_mag_channels(X_train_full)
 
-    # Expand the smaller test scenario into the *training* sensor space, not always to 24 channels.
-    X = expand_to_canonical(X, test_scenario, target_sensors=train_sensors)
+    X_test_full = expand_to_canonical(X_test_full, test_scenario, target_sensors=train_sensors)
+    X_train_full = expand_to_canonical(X_train_full, train_scenario, target_sensors=train_sensors)
+
     logo = LeaveOneGroupOut()
-    threshold = Config.DEFAULT_PARAMS[model_type].get("decision_threshold", 0.5)
     rows = []
 
-    for _, (_, test_idx) in enumerate(logo.split(X, y, groups)):
-        left_out = groups[test_idx[0]]
+    run_config = {
+        "model_type": model_type,
+        "train_scenario": train_scenario,
+        "test_scenario": test_scenario,
+        "loss": loss,
+        "inner_val_groups": int(inner_val_groups),
+        "scale": bool(scale),
+        "no_mag": bool(no_mag),
+        "only_mag": bool(only_mag),
+        "sensor_dropout": bool(sensor_dropout),
+        "sensor_dropout_p": float(sensor_dropout_p),
+        "sensor_dropout_max_off": int(sensor_dropout_max_off),
+        "threshold": float(threshold),
+        "tune_threshold": bool(tune_threshold),
+        "threshold_metric": threshold_metric,
+        "calibration": calibration,
+        "train_sensors": list(train_sensors),
+        "test_sensors": list(test_sensors),
+    }
+    with open(os.path.join(output_root, "fused_missing_run_config.json"), "w", encoding="utf-8") as f:
+        json.dump(run_config, f, indent=2)
+
+    for fold_idx, (_, test_idx) in enumerate(logo.split(X_test_full, y_test_full, groups_test_full)):
+        left_out = groups_test_full[test_idx[0]]
         fold_label = f"s{left_out}"
         fold_dir = os.path.join(output_root, f"fold_{fold_label}")
         os.makedirs(fold_dir, exist_ok=True)
-        X_test = X[test_idx]
-        y_test = y[test_idx]
+
+        X_test = X_test_full[test_idx]
+        y_test = y_test_full[test_idx]
+        sample_indices = test_idx
+        group_ids = groups_test_full[test_idx]
+        window_ids = window_ids_test_full[test_idx] if window_ids_test_full is not None else None
+
+        train_mask = groups_train_full != left_out
+        X_fit_all = X_train_full[train_mask]
+        y_fit_all = y_train_full[train_mask]
+        groups_fit_all = groups_train_full[train_mask]
+
+        inner_subjects = np.unique(groups_fit_all)
+        n_val_groups = min(int(inner_val_groups), len(inner_subjects) - 1)
+        if n_val_groups <= 0:
+            raise ValueError("Inner validation requires at least 2 training groups in each outer fold.")
+        start_idx = fold_idx % len(inner_subjects)
+        val_subjects = [inner_subjects[(start_idx + k) % len(inner_subjects)] for k in range(n_val_groups)]
+        val_mask = np.isin(groups_fit_all, val_subjects)
+        X_val = X_fit_all[val_mask]
+        y_val = y_fit_all[val_mask]
+        X_scale_fit = X_fit_all[~val_mask]
 
         if scale:
-            train_X = np.load(Config.get_data_file(train_scenario))
-            train_groups = np.load(Config.get_groups_file(train_scenario))
-            if no_mag:
-                train_X = drop_mag_channels(train_X)
-            if only_mag:
-                train_X = keep_only_mag_channels(train_X)
-
-            train_X = expand_to_canonical(train_X, train_scenario, target_sensors=train_sensors)
-            train_mask = train_groups != left_out
-            X_fit = train_X[train_mask]
-
-            if X_fit.shape[1:] != X_test.shape[1:]:
+            if X_scale_fit.shape[1:] != X_test.shape[1:]:
                 raise ValueError(
                     "Shape mismatch before scaling in fused-missing evaluation: "
-                    f"X_fit={X_fit.shape}, X_test={X_test.shape}"
+                    f"X_fit={X_scale_fit.shape}, X_test={X_test.shape}"
                 )
-
-            ch_fit = X_fit.shape[-1]
+            ch_fit = X_scale_fit.shape[-1]
             scaler = StandardScaler()
-            scaler.fit(X_fit.reshape(-1, ch_fit))
+            scaler.fit(X_scale_fit.reshape(-1, ch_fit))
             X_test = scaler.transform(X_test.reshape(-1, ch_fit)).reshape(X_test.shape)
+            X_val = scaler.transform(X_val.reshape(-1, ch_fit)).reshape(X_val.shape)
+
+        fold_threshold = float(threshold)
+        calibration_info = {"method": calibration}
 
         if model_type in Config.CLASSICAL_MODELS:
             model_path = os.path.join(model_root, f"fold_{fold_label}", f"model_{fold_label}.pkl")
@@ -545,23 +759,32 @@ def evaluate_padded_fused_model(
                 raise FileNotFoundError(model_path)
             clf = joblib.load(model_path)
             X_test_flat = X_test.reshape(len(X_test), -1)
+            X_val_flat = X_val.reshape(len(X_val), -1)
             expected_features = getattr(clf, "n_features_in_", X_test_flat.shape[1])
-            if X_test_flat.shape[1] != expected_features:
+            if X_test_flat.shape[1] != expected_features or X_val_flat.shape[1] != expected_features:
                 raise ValueError(
                     f"Feature mismatch for {fold_label}: model expects {expected_features}, "
-                    f"but {train_scenario} -> {test_scenario} produced {X_test_flat.shape[1]} features."
+                    f"but fused-missing data produced test={X_test_flat.shape[1]}, val={X_val_flat.shape[1]} features."
                 )
-            save_results_classical(
-                clf=clf,
-                X_test_flat=X_test_flat,
-                y_test=y_test,
-                decision_threshold=threshold,
-                i=fold_label,
+            test_probs = clf.predict_proba(X_test_flat)
+            val_probs = clf.predict_proba(X_val_flat)
+            if calibration in {"platt", "isotonic"}:
+                calibrator = _fit_probability_calibrator(val_probs[:, 1], y_val, calibration)
+                test_probs = _apply_probability_calibrator(test_probs[:, 1], calibrator)
+                val_probs = _apply_probability_calibrator(val_probs[:, 1], calibrator)
+                calibration_info["details"] = calibration
+            if tune_threshold:
+                fold_threshold, threshold_score = _pick_best_threshold(y_val, val_probs[:, 1], metric=threshold_metric)
+                calibration_info["threshold_tuning_score"] = threshold_score
+            _save_eval_from_probs(
+                y_true=y_test,
+                y_probs=test_probs,
+                decision_threshold=fold_threshold,
                 output_dir=fold_dir,
-                save_model=False,
-                sample_indices=test_idx,
-                group_ids=groups[test_idx],
-                window_ids=window_ids[test_idx] if window_ids is not None else None,
+                i=fold_label,
+                sample_indices=sample_indices,
+                group_ids=group_ids,
+                window_ids=window_ids,
                 scenario_name=test_scenario,
                 sensor_status=transfer_sensor_status(train_scenario, test_scenario),
             )
@@ -573,7 +796,7 @@ def evaluate_padded_fused_model(
                 raise FileNotFoundError(model_path)
             model = load_model_state(model, model_path, device=str(Config.DEVICE))
             model.to(Config.DEVICE)
-            loader = torch.utils.data.DataLoader(
+            test_loader = torch.utils.data.DataLoader(
                 torch.utils.data.TensorDataset(
                     torch.tensor(X_test, dtype=torch.float32),
                     torch.tensor(y_test, dtype=torch.long),
@@ -581,26 +804,65 @@ def evaluate_padded_fused_model(
                 batch_size=Config.TRAINING_CONFIG["batch_size"],
                 shuffle=False,
             )
-            save_results(
-                model=model,
-                val_loader=loader,
-                y_val_onehot=y_test,
-                i=fold_label,
-                decision_threshold=threshold,
+            val_loader = torch.utils.data.DataLoader(
+                torch.utils.data.TensorDataset(
+                    torch.tensor(X_val, dtype=torch.float32),
+                    torch.tensor(y_val, dtype=torch.long),
+                ),
+                batch_size=Config.TRAINING_CONFIG["batch_size"],
+                shuffle=False,
+            )
+            test_logits, test_probs, _ = _collect_neural_outputs(model, test_loader, Config.DEVICE)
+            val_logits, val_probs, _ = _collect_neural_outputs(model, val_loader, Config.DEVICE)
+            if calibration == "temperature":
+                temperature = _fit_temperature_from_logits(val_logits, y_val)
+                test_probs = _softmax_np(test_logits / temperature)
+                val_probs = _softmax_np(val_logits / temperature)
+                calibration_info["temperature"] = temperature
+            elif calibration in {"platt", "isotonic"}:
+                calibrator = _fit_probability_calibrator(val_probs[:, 1], y_val, calibration)
+                test_probs = _apply_probability_calibrator(test_probs[:, 1], calibrator)
+                val_probs = _apply_probability_calibrator(val_probs[:, 1], calibrator)
+                calibration_info["details"] = calibration
+            if tune_threshold:
+                fold_threshold, threshold_score = _pick_best_threshold(y_val, val_probs[:, 1], metric=threshold_metric)
+                calibration_info["threshold_tuning_score"] = threshold_score
+            _save_eval_from_probs(
+                y_true=y_test,
+                y_probs=test_probs,
+                decision_threshold=fold_threshold,
                 output_dir=fold_dir,
-                device=Config.DEVICE,
-                save_model=False,
-                sample_indices=test_idx,
-                group_ids=groups[test_idx],
-                window_ids=window_ids[test_idx] if window_ids is not None else None,
+                i=fold_label,
+                sample_indices=sample_indices,
+                group_ids=group_ids,
+                window_ids=window_ids,
                 scenario_name=test_scenario,
                 sensor_status=transfer_sensor_status(train_scenario, test_scenario),
+            )
+
+        with open(os.path.join(fold_dir, "fused_missing_config.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "fold": fold_label,
+                    "left_out_subject": int(left_out) if isinstance(left_out, (int, np.integer)) else str(left_out),
+                    "validation_subjects": [int(v) if isinstance(v, (int, np.integer)) else str(v) for v in val_subjects],
+                    "threshold": float(fold_threshold),
+                    "tune_threshold": bool(tune_threshold),
+                    "threshold_metric": threshold_metric,
+                    "calibration": calibration_info,
+                    "train_scenario": train_scenario,
+                    "test_scenario": test_scenario,
+                },
+                f,
+                indent=2,
             )
 
         metrics_path = os.path.join(fold_dir, "metrics.csv")
         if os.path.exists(metrics_path):
             row = pd.read_csv(metrics_path).iloc[0].to_dict()
             row["fold"] = fold_label
+            row["threshold"] = float(fold_threshold)
+            row["calibration"] = calibration
             rows.append(row)
 
     if rows:
