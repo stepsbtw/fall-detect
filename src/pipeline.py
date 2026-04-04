@@ -407,15 +407,6 @@ def apply_sensor_dropout_torch(xb, n_sensors, block_size=BLOCK_SIZE, p=0.5, max_
 
     return out
 
-
-def optimize_torch_runtime():
-    if DEVICE.type == 'cuda':
-        torch.backends.cudnn.deterministic = False
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-
-
 def get_loader_kwargs(shuffle=False, generator=None):
     pin_memory = bool(TRAINING_CONFIG.get('pin_memory', DEVICE.type == 'cuda'))
     configured = int(TRAINING_CONFIG.get('num_workers', 0))
@@ -553,7 +544,6 @@ def fit_and_eval_fold(
             criterion = nn.BCEWithLogitsLoss()
 
         generator = setup_runtime()
-        optimize_torch_runtime()
         scaler = torch.amp.GradScaler('cuda', enabled=(DEVICE.type == 'cuda'))
         train_loader = DataLoader(
             TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long)),
@@ -770,7 +760,6 @@ def infer_probs_with_loaded_model(args, X_test, trained_fold_model_dir, fold_lab
     model.to(DEVICE)
     model.eval()
 
-    optimize_torch_runtime()
     test_loader = DataLoader(
         TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.zeros(len(X_test), dtype=torch.long)),
         **get_loader_kwargs(shuffle=False),
