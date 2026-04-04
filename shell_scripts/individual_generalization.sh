@@ -10,12 +10,12 @@ scenarios=(left_T right_T chest_T left_right_T chest_left_T chest_right_T chest_
 
 for scenario in "${scenarios[@]}"; do
     for model in "${models[@]}"; do
-        #python run.py --train --model $model --scenario $scenario
+        python run.py --train --model $model --scenario $scenario
         python run.py --train --model $model --scenario $scenario --scale
-        #python run.py --train --model $model --scenario $scenario --scale --loss unweighted
-        #python run.py --train --model $model --scenario $scenario --scale --no-mag
-        #python run.py --train --model $model --scenario $scenario --scale --only-mag
-        #python run.py --train --model $model --scenario $scenario --scale --inner-val-groups 3
+        python run.py --train --model $model --scenario $scenario --scale --loss unweighted
+        python run.py --train --model $model --scenario $scenario --scale --no-mag
+        python run.py --train --model $model --scenario $scenario --scale --only-mag
+        python run.py --train --model $model --scenario $scenario --scale --inner-val-groups 3
     done
 done
 

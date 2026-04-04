@@ -2,10 +2,8 @@ numpy
 matplotlib
 scikit-learn
 seaborn
-optuna
 pandas
 
-optuna[visualization]
 kaleido
 plotly
 
