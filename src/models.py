@@ -10,7 +10,7 @@ CLASSICAL_MODELS = config.CLASSICAL_MODELS
 
 
 def create_model(model_type, input_shape, number_of_labels=1):
-    from src.neural_models import create_model as create_neural_model
+    from neural_models import create_model as create_neural_model
 
     return create_neural_model(model_type, input_shape, number_of_labels)
 
