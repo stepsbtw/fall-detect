@@ -2,6 +2,7 @@ import os
 import random
 
 import numpy as np
+import torch
 
 ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 DATA_PATH = os.path.normpath(os.path.join(ROOT_DIR, "dataset"))
