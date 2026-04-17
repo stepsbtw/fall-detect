@@ -1,778 +1,1311 @@
-import argparse
 import os
-import pandas as pd
+import glob
+
+import json
+import joblib
 import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
-from sklearn.model_selection import LeaveOneGroupOut
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.svm import LinearSVC
-from sklearn.calibration import CalibratedClassifierCV
+import pandas as pd
+from sklearn.model_selection import GroupKFold, LeaveOneGroupOut
 from sklearn.preprocessing import StandardScaler
-from xgboost import XGBClassifier
 
-try:
-    from catboost import CatBoostClassifier
-except ImportError:
-    CatBoostClassifier = None
-
-import optuna
-
-from src.neural_networks import CNN1DNet, MLPNet, LSTMNet, GRUNet
-from src.config import Config
-from src.test import save_results, save_results_classical, plot_loss_curve
-from src.sensor_fusion import (
-    sensors_from_scenario,
-    apply_sensor_dropout_batch,
-    zero_sensor_blocks,
-    scenario_output_name,
-)
+import src.config as config
+import src.utils as utils
 
 
-def train(
-    model,
-    train_loader,
-    val_loader,
-    optimizer,
-    criterion,
-    device,
-    epochs=Config.TRAINING_CONFIG.get("epochs"),
-    early_stopping=False,
-    patience=Config.TRAINING_CONFIG.get("patience"),
-    scaler=None,
-    trial=None,
-    step_offset=0,
-    scheduler=None,
-    batch_transform=None,
+def _predict_meta_prob_1(meta_model, X):
+    X = np.asarray(X, dtype=np.float32)
+    if hasattr(meta_model, "predict_proba") or hasattr(meta_model, "decision_function"):
+        return utils.estimator_binary_prob_1(meta_model, X)
+
+    import torch
+
+    meta_model.eval()
+    with torch.no_grad():
+        logits = meta_model(torch.tensor(X, dtype=torch.float32)).squeeze(1)
+        prob_1 = torch.sigmoid(logits).cpu().numpy()
+    return np.asarray(prob_1, dtype=float)
+
+
+def _tune_meta_threshold_with_group_oof(X, y, groups):
+    import src.models as models
+
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=int)
+    groups = np.asarray(groups)
+
+    if X.ndim != 2 or len(X) == 0:
+        return float(config.DECISION_THRESHOLD), float("nan"), "default"
+
+    unique_groups = np.unique(groups)
+    if unique_groups.size >= 2:
+        logo = LeaveOneGroupOut()
+        oof_prob_1 = np.full(len(y), np.nan, dtype=float)
+
+        for fit_idx, val_idx in logo.split(X, y, groups):
+            y_fit = y[fit_idx]
+            if np.unique(y_fit).size < 2:
+                continue
+
+            inner_meta_model = models.make_classical_model("LogisticRegression", y_fit)
+            inner_meta_model.fit(X[fit_idx], y_fit)
+            oof_prob_1[val_idx] = _predict_meta_prob_1(inner_meta_model, X[val_idx])
+
+        valid = np.isfinite(oof_prob_1)
+        if np.any(valid) and np.unique(y[valid]).size >= 2:
+            best_thr, best_score = utils.tune_threshold_f1(y[valid], oof_prob_1[valid])
+            return float(best_thr), float(best_score), "group_oof_logo"
+
+    return float(config.DECISION_THRESHOLD), float("nan"), "default"
+
+
+def _save_meta_validation_curve(X, y, groups, out_dir, seed):
+    import torch
+    import torch.nn as nn
+
+    X = np.asarray(X, dtype=np.float32)
+    y = np.asarray(y, dtype=int)
+    groups = np.asarray(groups)
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    unique_groups = np.unique(groups)
+    if X.ndim != 2 or len(X) == 0 or np.unique(y).size < 2 or unique_groups.size < 2:
+        with open(os.path.join(out_dir, "meta_validation_summary.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "status": "skipped",
+                    "reason": "insufficient_samples_or_classes_or_groups",
+                    "n_samples": int(len(X)),
+                    "n_groups": int(unique_groups.size),
+                    "n_classes": int(np.unique(y).size),
+                },
+                fh,
+                indent=2,
+            )
+        return
+
+    n_splits = min(int(config.INNER_FOLDS), int(unique_groups.size))
+    if n_splits < 2:
+        with open(os.path.join(out_dir, "meta_validation_summary.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "status": "skipped",
+                    "reason": "n_splits_less_than_2",
+                    "n_splits": int(n_splits),
+                },
+                fh,
+                indent=2,
+            )
+        return
+
+    epochs = max(1, int(getattr(config, "STACKING_META_DIAG_EPOCHS", 40)))
+    lr = float(getattr(config, "STACKING_META_DIAG_LR", 1e-2))
+
+    train_sum = np.zeros(epochs, dtype=float)
+    val_sum = np.zeros(epochs, dtype=float)
+    used_splits = 0
+
+    cv = GroupKFold(n_splits=n_splits)
+    for split_idx, (tr_idx, val_idx) in enumerate(cv.split(X, y, groups=groups)):
+        y_tr = y[tr_idx]
+        if np.unique(y_tr).size < 2:
+            continue
+
+        split_seed = int(seed + split_idx)
+        torch.manual_seed(split_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(split_seed)
+
+        x_tr = torch.as_tensor(X[tr_idx], dtype=torch.float32, device=config.DEVICE)
+        y_tr_t = torch.as_tensor(y[tr_idx], dtype=torch.float32, device=config.DEVICE).unsqueeze(1)
+        x_val = torch.as_tensor(X[val_idx], dtype=torch.float32, device=config.DEVICE)
+        y_val_t = torch.as_tensor(y[val_idx], dtype=torch.float32, device=config.DEVICE).unsqueeze(1)
+
+        pos_count = max(int((y[tr_idx] == 1).sum()), 1)
+        neg_count = max(int((y[tr_idx] == 0).sum()), 1)
+        pos_weight = torch.tensor([neg_count / pos_count], dtype=torch.float32, device=config.DEVICE)
+
+        model = nn.Linear(x_tr.shape[1], 1).to(config.DEVICE)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=config.WEIGHT_DECAY)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+        for epoch in range(epochs):
+            model.train()
+            optimizer.zero_grad(set_to_none=True)
+            with torch.amp.autocast(device_type="cuda", enabled=(config.DEVICE.type == "cuda")):
+                logits_tr = model(x_tr)
+                loss_tr = criterion(logits_tr, y_tr_t)
+            loss_tr.backward()
+            optimizer.step()
+
+            model.eval()
+            with torch.no_grad():
+                with torch.amp.autocast(device_type="cuda", enabled=(config.DEVICE.type == "cuda")):
+                    tr_eval = criterion(model(x_tr), y_tr_t)
+                    val_eval = criterion(model(x_val), y_val_t)
+            train_sum[epoch] += float(tr_eval.detach().item())
+            val_sum[epoch] += float(val_eval.detach().item())
+
+        used_splits += 1
+
+    if used_splits == 0:
+        with open(os.path.join(out_dir, "meta_validation_summary.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "status": "skipped",
+                    "reason": "no_valid_inner_splits",
+                },
+                fh,
+                indent=2,
+            )
+        return
+
+    train_curve = train_sum / float(used_splits)
+    val_curve = val_sum / float(used_splits)
+
+    pd.DataFrame(
+        {
+            "epoch": np.arange(1, epochs + 1),
+            "train_loss": train_curve,
+            "val_loss": val_curve,
+        }
+    ).to_csv(os.path.join(out_dir, "meta_validation_loss_curve.csv"), index=False)
+
+    utils.save_loss_curve_plot(
+        train_losses=train_curve.tolist(),
+        val_losses=val_curve.tolist(),
+        out_path=os.path.join(out_dir, "meta_validation_loss_curve.png"),
+    )
+
+    with open(os.path.join(out_dir, "meta_validation_summary.json"), "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "status": "ok",
+                "n_splits": int(n_splits),
+                "used_splits": int(used_splits),
+                "epochs": int(epochs),
+                "learning_rate": float(lr),
+            },
+            fh,
+            indent=2,
+        )
+
+def train_neural_model(
+    args,
+    X_train,
+    y_train,
+    X_val=None,
+    y_val=None,
+    epochs=None,
+    normalizer=None,
+    drop_sensors_override=None,
+    seed=None,
+    batch_size_override=None,
+    preload_to_device=False,
+    monitor_X=None,
+    monitor_y=None,
 ):
-    """Train with optional early stopping, mixed precision and Optuna pruning."""
-    model.to(device, non_blocking=True)
+    import src.models as models
+
+    import torch
+    import torch.nn as nn
+
+    input_shape = utils.model_input_shape(args.model, X_train)
+
+    model = models.create_model(args.model, input_shape, 1)
+    model.to(config.DEVICE)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=config.PATIENCE, min_lr=1e-6)
+    pos_count = max(int((y_train == 1).sum()), 1)
+    neg_count = max(int((y_train == 0).sum()), 1)
+    pos_weight = torch.tensor([neg_count / pos_count], dtype=torch.float32, device=config.DEVICE)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    train_seed = int(config.SEED if seed is None else seed)
+    torch.manual_seed(train_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(train_seed)
+
+    generator = torch.Generator()
+    generator.manual_seed(train_seed)
+    grad_scaler = torch.amp.GradScaler("cuda", enabled=(config.DEVICE.type == "cuda"))
+
+    norm_mean_t, norm_inv_std_t = None, None
+    if normalizer is not None:
+        norm_mean, norm_std = normalizer
+        norm_mean_t, norm_inv_std_t = utils.make_torch_standardizer(norm_mean, norm_std, config.DEVICE)
+
+    effective_batch_size = int(batch_size_override or config.BATCH_SIZE)
+    use_preloaded_path = bool(preload_to_device and config.DEVICE.type == "cuda" and X_val is None and y_val is None)
+
+    train_loader = None
+    val_loader = None
+    monitor_loader = None
+    if not use_preloaded_path:
+        train_loader = utils.make_tensor_loader(
+            X_train,
+            y=y_train,
+            shuffle=True,
+            generator=generator,
+            batch_size=effective_batch_size,
+        )
+        if X_val is not None and y_val is not None:
+            val_loader = utils.make_tensor_loader(
+                X_val,
+                y=y_val,
+                shuffle=False,
+                batch_size=effective_batch_size,
+            )
+
+    if monitor_X is not None and monitor_y is not None:
+        monitor_loader = utils.make_tensor_loader(
+            monitor_X,
+            y=monitor_y,
+            shuffle=False,
+            batch_size=effective_batch_size,
+        )
+
+    def _mean_loader_loss(loader):
+        if loader is None:
+            return float("nan")
+        model.eval()
+        losses = []
+        with torch.no_grad():
+            for xb, yb in loader:
+                xb = xb.to(config.DEVICE, non_blocking=True)
+                yb = yb.to(config.DEVICE, non_blocking=True)
+                xb = utils.standardize_batch_torch(xb, norm_mean_t, norm_inv_std_t)
+                with torch.amp.autocast(device_type="cuda", enabled=(config.DEVICE.type == "cuda")):
+                    out = model(xb)
+                    target = yb.float().unsqueeze(1)
+                    loss = criterion(out, target)
+                losses.append(float(loss.detach().item()))
+        return float(np.mean(losses)) if losses else float("nan")
+
+    train_losses, val_losses, monitor_losses = [], [], []
     best_val_loss = float("inf")
     patience_counter = 0
-    best_model_state = None
+    best_state = None
+    if drop_sensors_override is not None:
+        drop_sensors = list(drop_sensors_override)
+    else:
+        drop_sensors = utils.sensors_from_experiment(args.train_data)
+    epochs_to_run = int(epochs or config.EPOCHS)
 
-    avg_train_losses, avg_val_losses = [], []
+    if use_preloaded_path:
+        x_train_gpu = torch.as_tensor(X_train, dtype=torch.float32, device=config.DEVICE)
+        y_train_gpu = torch.as_tensor(y_train, dtype=torch.float32, device=config.DEVICE).unsqueeze(1)
+        n_samples = int(x_train_gpu.shape[0])
 
-    for epoch in range(epochs):
-        print(f"\n[{epoch}/{epochs}]")
+        for _ in range(epochs_to_run):
+            model.train()
+            epoch_train = []
+
+            perm = torch.randperm(n_samples, generator=generator)
+            for start in range(0, n_samples, effective_batch_size):
+                batch_idx = perm[start : start + effective_batch_size].to(config.DEVICE, non_blocking=True)
+                xb = x_train_gpu.index_select(0, batch_idx)
+                target = y_train_gpu.index_select(0, batch_idx)
+
+                xb = utils.standardize_batch_torch(xb, norm_mean_t, norm_inv_std_t)
+                if args.sensor_dropout:
+                    xb = utils.apply_sensor_dropout_torch(
+                        xb,
+                        n_sensors=len(drop_sensors),
+                        block_size=8,
+                        p=config.SENSOR_DROPOUT_P,
+                        max_off=config.SENSOR_DROPOUT_MAX_OFF,
+                    )
+
+                optimizer.zero_grad(set_to_none=True)
+                with torch.amp.autocast(device_type="cuda", enabled=True):
+                    out = model(xb)
+                    loss = criterion(out, target)
+
+                grad_scaler.scale(loss).backward()
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
+                epoch_train.append(float(loss.detach().item()))
+
+            train_losses.append(float(np.mean(epoch_train)) if epoch_train else float("nan"))
+            if monitor_loader is not None:
+                monitor_losses.append(_mean_loader_loss(monitor_loader))
+
+        epochs_ran = len(train_losses)
+        return {
+            "model": model,
+            "train_losses": train_losses,
+            "val_losses": val_losses,
+            "monitor_losses": monitor_losses,
+            "best_val_loss": float("nan"),
+            "epochs_ran": epochs_ran,
+        }
+
+    for _ in range(epochs_to_run):
         model.train()
-        train_losses = []
+        epoch_train = []
 
         for xb, yb in train_loader:
-            if batch_transform is not None:
-                xb = batch_transform(xb)
-            xb = xb.to(device, non_blocking=True)
-            yb = yb.to(device, non_blocking=True)
+            xb = xb.to(config.DEVICE, non_blocking=True)
+            yb = yb.to(config.DEVICE, non_blocking=True)
+
+            xb = utils.standardize_batch_torch(xb, norm_mean_t, norm_inv_std_t)
+
+            if args.sensor_dropout:
+                xb = utils.apply_sensor_dropout_torch(xb, n_sensors=len(drop_sensors), block_size=8, p=config.SENSOR_DROPOUT_P, max_off=config.SENSOR_DROPOUT_MAX_OFF)
+
             optimizer.zero_grad(set_to_none=True)
 
-            amp_enabled = scaler is not None and getattr(device, "type", str(device)) == "cuda"
-            if amp_enabled:
-                with torch.amp.autocast(device_type="cuda"):
-                    out = model(xb)
-                    loss = criterion(out, yb)
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                out = model(xb)
-                loss = criterion(out, yb)
-                loss.backward()
-                optimizer.step()
+            with torch.amp.autocast(device_type="cuda", enabled=(config.DEVICE.type == "cuda")):
+                out = model(xb); target = yb.float().unsqueeze(1); loss = criterion(out, target)
 
-            train_losses.append(loss.item())
+            grad_scaler.scale(loss).backward()
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
+            epoch_train.append(float(loss.detach().item()))
 
-        avg_train_loss = np.mean(train_losses)
-        avg_train_losses.append(avg_train_loss)
+        train_losses.append(float(np.mean(epoch_train)) if epoch_train else float("nan"))
+
+        if monitor_loader is not None:
+            monitor_losses.append(_mean_loader_loss(monitor_loader))
+
+        if val_loader is None:
+            continue
 
         model.eval()
-        val_losses, y_true, y_pred = [], [], []
+        epoch_val = []
         with torch.no_grad():
             for xb, yb in val_loader:
-                xb = xb.to(device, non_blocking=True)
-                yb = yb.to(device, non_blocking=True)
-                amp_enabled = scaler is not None and getattr(device, "type", str(device)) == "cuda"
-                if amp_enabled:
-                    with torch.amp.autocast(device_type="cuda"):
-                        out = model(xb)
-                        loss = criterion(out, yb)
-                else:
-                    out = model(xb)
-                    loss = criterion(out, yb)
-                val_losses.append(loss.item())
-                y_pred.extend(torch.argmax(out, dim=1).cpu().numpy())
-                y_true.extend(yb.cpu().numpy())
+                xb = xb.to(config.DEVICE, non_blocking=True)
+                yb = yb.to(config.DEVICE, non_blocking=True)
+                xb = utils.standardize_batch_torch(xb, norm_mean_t, norm_inv_std_t)
+                with torch.amp.autocast(device_type="cuda", enabled=(config.DEVICE.type == "cuda")):
+                    out = model(xb); target = yb.float().unsqueeze(1); loss = criterion(out, target)
+                epoch_val.append(float(loss.detach().item()))
 
-        avg_val_loss = np.mean(val_losses)
-        avg_val_losses.append(avg_val_loss)
+        avg_val_loss = float(np.mean(epoch_val)) if epoch_val else float("nan")
+        val_losses.append(avg_val_loss)
 
-        if scheduler is not None:
+        if np.isfinite(avg_val_loss):
             scheduler.step(avg_val_loss)
 
-        if trial is not None:
-            trial.report(avg_val_loss, step_offset + epoch)
-            if trial.should_prune():
-                raise optuna.exceptions.TrialPruned()
-
-        if early_stopping:
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                best_model_state = model.state_dict()
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch + 1}")
-                    break
-
-    torch.cuda.empty_cache()
-
-    if early_stopping and best_model_state is not None:
-        model.load_state_dict(best_model_state)
-        val_losses, y_pred, y_true = [], [], []
-        with torch.no_grad():
-            for xb, yb in val_loader:
-                xb = xb.to(device, non_blocking=True)
-                yb = yb.to(device, non_blocking=True)
-                out = model(xb)
-                loss = criterion(out, yb)
-                val_losses.append(loss.item())
-                y_pred.extend(torch.argmax(out, dim=1).cpu().numpy())
-                y_true.extend(yb.cpu().numpy())
-        avg_val_losses[-1] = np.mean(val_losses)
-
-    return y_pred, y_true, avg_val_losses, avg_train_losses
-
-
-def create_model(model_type, best_params, input_shape, num_labels):
-    """Create a neural model from the selected hyperparameters."""
-    if model_type == "CNN1D":
-        return CNN1DNet(
-            input_shape=input_shape,
-            filter_size=best_params["filter_size"],
-            kernel_size=best_params["kernel_size"],
-            num_layers=best_params["num_layers"],
-            num_dense_layers=best_params["num_dense_layers"],
-            dense_neurons=best_params["dense_neurons"],
-            dropout=best_params["dropout"],
-            number_of_labels=num_labels,
-        )
-    if model_type == "MLP":
-        return MLPNet(
-            input_dim=input_shape,
-            num_layers=best_params["num_layers"],
-            dense_neurons=best_params["dense_neurons"],
-            dropout=best_params["dropout"],
-            number_of_labels=num_labels,
-        )
-    if model_type == "LSTM":
-        return LSTMNet(
-            input_dim=input_shape[1],
-            hidden_dim=best_params["hidden_dim"],
-            num_layers=best_params["num_layers"],
-            dropout=best_params["dropout"],
-            number_of_labels=num_labels,
-        )
-    if model_type == "GRU":
-        return GRUNet(
-            input_dim=input_shape[1],
-            hidden_dim=best_params["hidden_dim"],
-            num_layers=best_params["num_layers"],
-            dropout=best_params["dropout"],
-            number_of_labels=num_labels,
-        )
-    raise ValueError(f"Tipo de modelo nao suportado: {model_type}")
-
-
-def _make_classical_model(model_type, params, y_train):
-    from sklearn.linear_model import LogisticRegression
-    """Instantiate a classical model from a parameter dict."""
-    if model_type == "RF":
-        defaults = Config.DEFAULT_PARAMS["RF"]
-        return RandomForestClassifier(
-            n_estimators=int(params.get("n_estimators", defaults["n_estimators"])),
-            max_depth=int(params.get("max_depth", defaults["max_depth"])),
-            min_samples_split=int(params.get("min_samples_split", defaults["min_samples_split"])),
-            class_weight="balanced",
-            random_state=Config.SEED,
-            n_jobs=-1,
-        )
-    if model_type == "SVM":
-        defaults = Config.DEFAULT_PARAMS["SVM"]
-        return CalibratedClassifierCV(
-            LinearSVC(
-                C=float(params.get("C", defaults["C"])),
-                class_weight="balanced",
-                dual="auto",
-                max_iter=2000,
-                random_state=Config.SEED,
-            ),
-            cv=3,
-            method="sigmoid",
-        )
-    if model_type == "XGBoost":
-        defaults = Config.DEFAULT_PARAMS["XGBoost"]
-        scale_pos_weight = int((y_train == 0).sum()) / max(int((y_train == 1).sum()), 1)
-        return XGBClassifier(
-            n_estimators=int(params.get("n_estimators", defaults["n_estimators"])),
-            max_depth=int(params.get("max_depth", defaults["max_depth"])),
-            learning_rate=float(params.get("learning_rate", defaults["learning_rate"])),
-            subsample=float(params.get("subsample", defaults["subsample"])),
-            colsample_bytree=float(params.get("colsample_bytree", defaults["colsample_bytree"])),
-            scale_pos_weight=scale_pos_weight,
-            eval_metric="logloss",
-            random_state=Config.SEED,
-            n_jobs=-1,
-        )
-    if model_type == "CatBoost":
-        defaults = Config.DEFAULT_PARAMS["CatBoost"]
-        if CatBoostClassifier is None:
-            raise ImportError("CatBoost nao esta instalado. Instale com: pip install catboost")
-        class_weights = [
-            1.0,
-            max(float((y_train == 0).sum()) / max(float((y_train == 1).sum()), 1.0), 1.0),
-        ]
-        return CatBoostClassifier(
-            iterations=int(params.get("n_estimators", defaults["n_estimators"])),
-            depth=int(params.get("depth", defaults["depth"])),
-            learning_rate=float(params.get("learning_rate", defaults["learning_rate"])),
-            l2_leaf_reg=float(params.get("l2_leaf_reg", defaults["l2_leaf_reg"])),
-            class_weights=class_weights,
-            loss_function="Logloss",
-            eval_metric="F1",
-            random_seed=Config.SEED,
-            verbose=False,
-        )
-    if model_type == "LogisticRegression":
-        defaults = Config.DEFAULT_PARAMS["LogisticRegression"]
-        return LogisticRegression(
-            C=float(params.get("C", defaults["C"])),
-            class_weight="balanced",
-            max_iter=1000,
-            random_state=Config.SEED,
-            solver="lbfgs",
-        )
-    raise ValueError(f"Unknown classical model type: {model_type}")
-
-
-SCENARIO_CHOICES = list(Config.SCENARIOS.keys())
-
-
-def drop_mag_channels(X):
-    """Drop the engineered magnitude channels (mag_acc and mag_gyr) from X.
-
-    Channel layout per 8-channel sensor block:
-      0: mag_acc  1: acc_x  2: acc_y  3: acc_z
-      4: mag_gyr  5: gyr_x  6: gyr_y  7: gyr_z
-
-    Drops indices 0 and 4 for each sensor block, so:
-      8-ch  -> 6-ch  (drop [0,4])
-      16-ch -> 12-ch (drop [0,4,8,12])
-      24-ch -> 18-ch (drop [0,4,8,12,16,20])
-    """
-    # ...existing code...
-    C = X.shape[2]
-    n_sensors = C // 8
-    mag_cols = {s * 8 + offset for s in range(n_sensors) for offset in (0, 4)}
-    keep_cols = [c for c in range(C) if c not in mag_cols]
-    return X[:, :, keep_cols]
-
-
-def keep_only_mag_channels(X):
-    """Keep only the engineered magnitude channels (mag_acc and mag_gyr), drop raw axes.
-
-    Channel layout per 8-channel sensor block:
-      0: mag_acc  1: acc_x  2: acc_y  3: acc_z
-      4: mag_gyr  5: gyr_x  6: gyr_y  7: gyr_z
-
-    Keeps indices 0 and 4 for each sensor block, so:
-      8-ch  -> 2-ch  (keep [0,4])
-      16-ch -> 4-ch  (keep [0,4,8,12])
-      24-ch -> 6-ch  (keep [0,4,8,12,16,20])
-    """
-    C = X.shape[2]
-    n_sensors = C // 8
-    keep_cols = [s * 8 + offset for s in range(n_sensors) for offset in (0, 4)]
-    return X[:, :, keep_cols]
-
-
-def make_sensor_dropout_transform(scenario, p=0.5, max_off=1, allow_no_dropout=True):
-    sensors = sensors_from_scenario(scenario)
-    call_state = {"count": 0}
-
-    def _transform(xb):
-        batch_seed = int(Config.SEED) + int(call_state["count"])
-        call_state["count"] += 1
-        x_np = xb.detach().cpu().numpy()
-        x_np, _ = apply_sensor_dropout_batch(
-            x_np,
-            sensors=sensors,
-            p=p,
-            max_off=max_off,
-            allow_no_dropout=allow_no_dropout,
-            seed=batch_seed,
-        )
-        return torch.tensor(x_np, dtype=xb.dtype)
-
-    return _transform
-
-
-def evaluate_missing_sensor_conditions(
-    model,
-    X_test,
-    y_test,
-    scenario,
-    decision_threshold,
-    fold_dir,
-    device,
-    batch_size,
-    sample_indices=None,
-    group_ids=None,
-    window_ids=None,
-):
-    sensors = sensors_from_scenario(scenario)
-    for sensor in sensors:
-        X_masked = zero_sensor_blocks(X_test, [sensor], scenario=scenario, inplace=False)
-        cond_dir = os.path.join(fold_dir, f"missing_{sensor}")
-        loader = DataLoader(
-            TensorDataset(
-                torch.tensor(X_masked, dtype=torch.float32),
-                torch.tensor(y_test, dtype=torch.long),
-            ),
-            batch_size=batch_size,
-            shuffle=False,
-            pin_memory=Config.TRAINING_CONFIG["pin_memory"],
-            num_workers=Config.TRAINING_CONFIG["num_workers"],
-            generator=getattr(Config, "TORCH_GENERATOR", None),
-        )
-        save_results(
-            model=model,
-            val_loader=loader,
-            y_val_onehot=y_test,
-            i=f"missing_{sensor}",
-            decision_threshold=decision_threshold,
-            output_dir=cond_dir,
-            device=device,
-            save_model=False,
-            sample_indices=sample_indices,
-            group_ids=group_ids,
-            window_ids=window_ids,
-            scenario_name=scenario,
-            sensor_status={"missing": [sensor], "available": [s for s in sensors if s != sensor]},
-        )
-
-
-def _input_shape_from_data(X, model_type):
-    """Derive the correct input_shape for a model from the actual data array."""
-    _, T, C = X.shape
-    if model_type == "MLP":
-        return T * C
-    return (T, C)  # CNN1D and LSTM
-
-
-
-
-def _write_train_summary(base_out):
-    fold_dirs = sorted(
-        fp for fp in os.listdir(base_out)
-        if fp.startswith("fold_") and os.path.exists(os.path.join(base_out, fp, "metrics.csv"))
-    ) if os.path.exists(base_out) else []
-    rows = []
-    for fold_name in fold_dirs:
-        metrics_path = os.path.join(base_out, fold_name, "metrics.csv")
-        fold_row = pd.read_csv(metrics_path).iloc[0].to_dict()
-        fold_row["fold"] = fold_name.replace("fold_", "")
-        rows.append(fold_row)
-    if rows:
-        pd.DataFrame(rows).to_csv(os.path.join(base_out, "summary_metrics.csv"), index=False)
-        Config.mark_run_complete(base_out)
-        Config.clear_running_marker(base_out)
-
-def run_final_training(args):
-    """Outer LOGO over all subjects using Config.DEFAULT_PARAMS, no HP search."""
-    scenario = args.scenario
-    model_type_arg = args.model
-    epochs = args.epochs
-    loss_type = getattr(args, "loss", "weighted")
-    inner_val_groups = getattr(args, "inner_val_groups")
-    scale = getattr(args, "scale", False)
-    no_mag = getattr(args, "no_mag", False)
-    only_mag = getattr(args, "only_mag", False)
-    sensor_dropout = getattr(args, "sensor_dropout", False)
-    sensor_dropout_p = float(getattr(args, "sensor_dropout_p", 0.5))
-    sensor_dropout_max_off = int(getattr(args, "sensor_dropout_max_off", 1))
-    evaluate_missing = getattr(args, "evaluate_missing", False)
-
-    if not model_type_arg:
-        raise ValueError("--model e obrigatorio para o modo train.")
-
-    model_type = model_type_arg
-    best_params = Config.DEFAULT_PARAMS[model_type]
-    print(f"Usando parametros padrao para {model_type}: {best_params}")
-    print(f"Loss: {loss_type} class weights")
-    print(f"Inner validation groups per outer fold: {inner_val_groups}")
-    if sensor_dropout:
-        print(f"Sensor dropout enabled: p={sensor_dropout_p:.3f}, max_off={sensor_dropout_max_off}")
-
-    scenario_out = scenario_output_name(
-        model_type,
-        scenario,
-        loss=loss_type,
-        inner_val_groups=inner_val_groups,
-        scale=scale,
-        no_mag=no_mag,
-        only_mag=only_mag,
-        sensor_dropout=sensor_dropout,
-        sensor_dropout_p=sensor_dropout_p,
-        sensor_dropout_max_off=sensor_dropout_max_off,
-    )
-    base_out = Config.get_output_dir(model_type_arg, scenario_out)
-    os.makedirs(base_out, exist_ok=True)
-    if Config.is_run_complete(base_out):
-        print(f"Run already complete at: {base_out} - skipping.")
-        return
-    Config.set_running_marker(base_out)
-
-    X = np.load(Config.get_data_file(scenario))
-    y = np.load(Config.get_labels_file(scenario)).astype(np.int64)
-    groups = np.load(Config.get_groups_file(scenario))
-    window_ids_path = os.path.join(os.path.dirname(Config.get_labels_file(scenario)), "window_ids.npy")
-    window_ids = np.load(window_ids_path, allow_pickle=True) if os.path.exists(window_ids_path) else None
-
-    if no_mag:
-        X = drop_mag_channels(X)
-        print(f"Dropped magnitude channels — new X shape: {X.shape}")
-    if only_mag:
-        X = keep_only_mag_channels(X)
-        print(f"Kept only magnitude channels — new X shape: {X.shape}")
-
-    unique_subjects = np.unique(groups)
-    print(f"Sujeitos (LOGO): {sorted(unique_subjects.tolist())} ({len(unique_subjects)} total)")
-
-    logo = LeaveOneGroupOut()
-    n_folds = logo.get_n_splits(groups=groups)
-    threshold = best_params.get("decision_threshold", 0.5)
-
-    if model_type in Config.CLASSICAL_MODELS:
-        for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
-            left_out = groups[test_idx[0]]
-            fold_dir = os.path.join(base_out, f"fold_s{left_out}")
-            model_fold_dir = os.path.join(Config.get_models_dir(model_type_arg, scenario_out), f"fold_s{left_out}")
-            fold_label = f"s{left_out}"
-            if Config.fold_done(fold_dir):
-                print(f"  Fold s{left_out} ja concluido - pulando.")
-                continue
-            print(f"  Fold {fold_idx + 1}/{n_folds} - sujeito de teste: {left_out}")
-            os.makedirs(fold_dir, exist_ok=True)
-            # Use same training split as neural networks (exclude inner validation subjects)
-            X_train_all = X[train_idx]
-            y_train_all = y[train_idx]
-            groups_train = groups[train_idx]
-            inner_subjects = np.unique(groups_train)
-            n_val_groups = min(inner_val_groups, len(inner_subjects) - 1)
-            if n_val_groups <= 0:
-                raise ValueError(
-                    "Inner validation requires at least 2 training groups in each outer fold."
-                )
-            start_idx = fold_idx % len(inner_subjects)
-            val_subjects = [
-                inner_subjects[(start_idx + k) % len(inner_subjects)] for k in range(n_val_groups)
-            ]
-            val_mask = np.isin(groups_train, val_subjects)
-            print(f"    Validation subjects: {sorted(np.array(val_subjects).tolist())}")
-            #X_train = X_train_all[~val_mask].reshape(-1, X_train_all.shape[2])
-            
-            X_train = X_train_all[~val_mask]
-            if X_train.ndim > 2:
-                X_train = X_train.reshape(X_train.shape[0], -1)
-            y_train = y_train_all[~val_mask]
-            X_te = X[test_idx].reshape(len(test_idx), -1)
-            y_te = y[test_idx]
-            if scale:
-                feature_scaler = StandardScaler()
-                X_train = feature_scaler.fit_transform(X_train)
-                X_te = feature_scaler.transform(X_te)
-            print(f"X_train shape: {X_train.shape}")
-            print(f"y_train shape: {y_train.shape}")
-            if X_train.shape[0] != y_train.shape[0]:
-                print("[ERROR] X_train and y_train have different number of samples!")
-            clf = _make_classical_model(model_type, best_params, y_train)
-            clf.fit(X_train, y_train)
-            save_results_classical(
-                clf=clf,
-                X_test_flat=X_te,
-                y_test=y_te,
-                decision_threshold=threshold,
-                i=fold_label,
-                output_dir=fold_dir,
-                model_output_dir=model_fold_dir,
-                sample_indices=test_idx,
-                group_ids=groups[test_idx],
-                window_ids=window_ids[test_idx] if window_ids is not None else None,
-                scenario_name=scenario,
-            )
-            print(f"  Fold s{left_out} concluido")
-        print(f"\nLOGO concluido! Resultados em: {base_out}")
-        return
-
-    input_shape_dict = Config.get_input_shape_dict(scenario, model_type)
-    input_shape = input_shape_dict[model_type]
-    if no_mag:
-        input_shape = _input_shape_from_data(X, model_type)
-    if only_mag:
-        input_shape = _input_shape_from_data(X, model_type)
-    batch_size = Config.TRAINING_CONFIG.get("batch_size", 32)
-    batch_transform = None
-    if sensor_dropout:
-        batch_transform = make_sensor_dropout_transform(
-            scenario,
-            p=sensor_dropout_p,
-            max_off=sensor_dropout_max_off,
-            allow_no_dropout=True,
-        )
-
-    Config.set_seed(Config.SEED + Config.FINAL_TRAINING["seed_offset"])
-    for fold_idx, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
-        left_out = groups[test_idx[0]]
-        fold_dir = os.path.join(base_out, f"fold_s{left_out}")
-        model_fold_dir = os.path.join(Config.get_models_dir(model_type_arg, scenario_out), f"fold_s{left_out}")
-        fold_label = f"s{left_out}"
-        if Config.fold_done(fold_dir):
-            print(f"\n  Fold s{left_out} ja concluido - pulando.")
-            continue
-        print(f"\n  Fold {fold_idx + 1}/{n_folds} - sujeito de teste: {left_out}")
-        os.makedirs(fold_dir, exist_ok=True)
-
-        X_train_all = X[train_idx]
-        y_train_all = y[train_idx]
-        groups_train = groups[train_idx]
-
-        inner_subjects = np.unique(groups_train)
-        n_val_groups = min(inner_val_groups, len(inner_subjects) - 1)
-        if n_val_groups <= 0:
-            raise ValueError(
-                "Inner validation requires at least 2 training groups in each outer fold."
-            )
-        start_idx = fold_idx % len(inner_subjects)
-        val_subjects = [
-            inner_subjects[(start_idx + k) % len(inner_subjects)] for k in range(n_val_groups)
-        ]
-        val_mask = np.isin(groups_train, val_subjects)
-        print(f"    Validation subjects: {sorted(np.array(val_subjects).tolist())}")
-        X_train = X_train_all[~val_mask]
-        y_train = y_train_all[~val_mask]
-        X_es = X_train_all[val_mask]
-        y_es = y_train_all[val_mask]
-
-        X_test = X[test_idx]
-        y_test = y[test_idx]
-
-        if scale:
-            N_tr, T, C = X_train.shape
-            feature_scaler = StandardScaler()
-            X_train = feature_scaler.fit_transform(X_train.reshape(-1, C)).reshape(N_tr, T, C)
-            X_es   = feature_scaler.transform(X_es.reshape(-1, C)).reshape(X_es.shape[0], T, C)
-            X_test = feature_scaler.transform(X_test.reshape(-1, C)).reshape(X_test.shape[0], T, C)
-
-        amp_scaler = torch.cuda.amp.GradScaler(enabled=Config.DEVICE.type == "cuda")
-
-        model = create_model(model_type, best_params, input_shape, Config.NUM_LABELS)
-        model.to(Config.DEVICE)
-
-        effective_batch_size = batch_size
-        if torch.cuda.device_count() > 1 and Config.DEVICE.type == "cuda":
-            print(f"Usando {torch.cuda.device_count()} GPUs com DataParallel")
-            model = torch.nn.DataParallel(model)
-            effective_batch_size = batch_size * torch.cuda.device_count()
-            print(f"Batch size ajustado para {effective_batch_size} (batch_size * num_gpus)")
-
-        optimizer = torch.optim.Adam(
-            model.parameters(), lr=best_params["learning_rate"], weight_decay=1e-4
-        )
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=Config.TRAINING_CONFIG.get("patience"), min_lr=1e-6
-        )
-        if loss_type == "weighted":
-            class_counts = np.bincount(y_train, minlength=Config.NUM_LABELS)
-            class_weights = len(y_train) / (Config.NUM_LABELS * class_counts.astype(float))
-            weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(Config.DEVICE)
-            criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            patience_counter = 0
         else:
-            criterion = nn.CrossEntropyLoss()
+            patience_counter += 1
+            if patience_counter >= config.PATIENCE:
+                break
 
-        train_loader = DataLoader(
-            TensorDataset(
-                torch.tensor(X_train, dtype=torch.float32),
-                torch.tensor(y_train, dtype=torch.long),
-            ),
-            batch_size=batch_size,
-            shuffle=True,
-            pin_memory=Config.TRAINING_CONFIG["pin_memory"],
-            num_workers=Config.TRAINING_CONFIG["num_workers"],
-            generator=getattr(Config, "TORCH_GENERATOR", None),
+    epochs_ran = len(train_losses)
+
+    if val_loader is not None and best_state is not None:
+        model.load_state_dict(best_state)
+
+    return {
+        "model": model,
+        "train_losses": train_losses,
+        "val_losses": val_losses,
+        "monitor_losses": monitor_losses,
+        "best_val_loss": best_val_loss if val_loader is not None else float("nan"),
+        "epochs_ran": epochs_ran,
+    }
+
+
+def fit_and_eval_fold(args, train_bundle, train_idx, test_idx, fold_idx, fold_dir, fold_model_dir, 
+                      experiment_for_outputs, sensor_status, test_bundle=None):
+    import src.models as models
+
+    os.makedirs(fold_dir, exist_ok=True)
+    os.makedirs(fold_model_dir, exist_ok=True)
+    metrics_path = os.path.join(fold_dir, "metrics.csv")
+    if os.path.exists(metrics_path):
+        if args.model in models.CLASSICAL_MODELS:
+            return pd.read_csv(metrics_path).iloc[0].to_dict()
+
+        inner_curve_csvs = glob.glob(os.path.join(fold_dir, "inner_loss_curves", "inner_fold_*_loss_curve.csv"))
+        inner_curve_pngs = glob.glob(os.path.join(fold_dir, "inner_loss_curves", "inner_fold_*_loss_curve.png"))
+        if inner_curve_csvs and inner_curve_pngs:
+            return pd.read_csv(metrics_path).iloc[0].to_dict()
+
+        print(f"[REBUILD] Missing inner CV loss artifacts in {fold_dir}; recomputing fold outputs.")
+
+    test_bundle = test_bundle or train_bundle
+    X_train_all = train_bundle["X"][train_idx]
+    y_train_all = train_bundle["y"][train_idx]
+    groups_train = train_bundle["groups"][train_idx]
+    X_test = test_bundle["X"][test_idx]
+    y_test = test_bundle["y"][test_idx]
+
+    threshold = config.DECISION_THRESHOLD
+    fold_label = os.path.basename(fold_dir).replace("fold_", "")
+    final_epochs = config.EPOCHS
+    threshold_score = float("nan")
+    inner_loss_rows = []
+
+    unique_groups = np.unique(groups_train)
+    n_splits = min(int(config.INNER_FOLDS), len(unique_groups))
+    if n_splits < 2: raise ValueError("Inner GroupCV requires at least 2 groups in the outer-train set.")
+    inner_cv = GroupKFold(n_splits=n_splits)
+    utils._log_fold("INNER-CV", fold_idx, None, n_splits=n_splits, train_samples=len(train_idx), test_samples=len(test_idx))
+    oof_prob_1 = np.full(len(y_train_all), np.nan, dtype=float)
+    inner_epoch_counts = []
+
+    for inner_fold_idx, (inner_tr_idx, inner_val_idx) in enumerate(inner_cv.split(X_train_all, y_train_all, groups=groups_train)):
+        utils._log_fold(
+            "INNER",
+            inner_fold_idx,
+            n_splits,
+            train=len(inner_tr_idx),
+            val=len(inner_val_idx),
         )
+        X_train = X_train_all[inner_tr_idx]
+        y_train = y_train_all[inner_tr_idx]
+        X_val = X_train_all[inner_val_idx]
+        y_val = y_train_all[inner_val_idx]
 
-        es_loader = DataLoader(
-            TensorDataset(
-                torch.tensor(X_es, dtype=torch.float32),
-                torch.tensor(y_es, dtype=torch.long),
-            ),
-            batch_size=batch_size,
-            shuffle=False,
-            pin_memory=Config.TRAINING_CONFIG["pin_memory"],
-            num_workers=Config.TRAINING_CONFIG["num_workers"],
-            generator=getattr(Config, "TORCH_GENERATOR", None),
-        )
+        if args.model in models.CLASSICAL_MODELS:
+            if args.sensor_dropout:
+                drop_sensors = utils.sensors_from_experiment(args.train_data)
+                X_train_fit_src, y_train_fit = utils.augment_sensor_dropout(
+                    X_train,
+                    y_train,
+                    sensors=drop_sensors,
+                    block_size=8,
+                    p=config.SENSOR_DROPOUT_P,
+                    max_off=config.SENSOR_DROPOUT_MAX_OFF,
+                    copies=1,
+                    seed=config.SEED + int(int(fold_idx) * 100 + int(inner_fold_idx)),
+                )
+            else:
+                X_train_fit_src, y_train_fit = X_train, y_train
 
-        test_loader = DataLoader(
-            TensorDataset(
-                torch.tensor(X_test, dtype=torch.float32),
-                torch.tensor(y_test, dtype=torch.long),
-            ),
-            batch_size=batch_size,
-            shuffle=False,
-            pin_memory=Config.TRAINING_CONFIG["pin_memory"],
-            num_workers=Config.TRAINING_CONFIG["num_workers"],
-            generator=getattr(Config, "TORCH_GENERATOR", None),
-        )
+            X_train_fit = X_train_fit_src.reshape(len(X_train_fit_src), -1)
+            X_val_fit = X_val.reshape(len(X_val), -1)
+            inner_model = models.make_classical_model(args.model, y_train_fit)
+            inner_model.fit(X_train_fit, y_train_fit)
 
-        _, _, val_losses, train_losses = train(
-            model,
-            train_loader,
-            es_loader,
-            optimizer,
-            criterion,
-            Config.DEVICE,
-            epochs=epochs,
-            early_stopping=True,
-            patience=Config.TRAINING_CONFIG["patience"],
-            scaler=amp_scaler,
-            scheduler=scheduler,
-            batch_transform=batch_transform,
-        )
+            prob_1 = utils.estimator_binary_prob_1(inner_model, X_val_fit)
+            val_probs = np.column_stack([1.0 - prob_1, prob_1])
+            oof_prob_1[inner_val_idx] = val_probs[:, 1]
+        else:
+            import torch
 
-        plot_loss_curve(train_losses, val_losses, fold_dir, fold_label)
+            train_result = train_neural_model(args=args, X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val)
+            inner_curve_dir = os.path.join(fold_dir, "inner_loss_curves")
+            os.makedirs(inner_curve_dir, exist_ok=True)
+            inner_curve_csv = os.path.join(inner_curve_dir, f"inner_fold_{int(inner_fold_idx)}_loss_curve.csv")
+            inner_curve_png = os.path.join(inner_curve_dir, f"inner_fold_{int(inner_fold_idx)}_loss_curve.png")
 
-        save_results(
-            model=model,
-            val_loader=test_loader,
-            y_val_onehot=y_test,
-            i=fold_label,
-            decision_threshold=threshold,
-            output_dir=fold_dir,
-            device=Config.DEVICE,
-            model_output_dir=model_fold_dir,
-            sample_indices=test_idx,
-            group_ids=groups[test_idx],
-            window_ids=window_ids[test_idx] if window_ids is not None else None,
-            scenario_name=scenario,
-            sensor_status={"missing": [], "available": sensors_from_scenario(scenario)},
-        )
-        if evaluate_missing:
-            evaluate_missing_sensor_conditions(
-                model=model,
-                X_test=X_test,
-                y_test=y_test,
-                scenario=scenario,
-                decision_threshold=threshold,
-                fold_dir=fold_dir,
-                device=Config.DEVICE,
-                batch_size=batch_size,
-                sample_indices=test_idx,
-                group_ids=groups[test_idx],
-                window_ids=window_ids[test_idx] if window_ids is not None else None,
+            train_hist = list(train_result["train_losses"])
+            val_hist = list(train_result["val_losses"])
+            max_len = max(len(train_hist), len(val_hist))
+            if max_len > 0:
+                train_pad = train_hist + [np.nan] * (max_len - len(train_hist))
+                val_pad = val_hist + [np.nan] * (max_len - len(val_hist))
+                pd.DataFrame(
+                    {
+                        "epoch": np.arange(1, max_len + 1),
+                        "train_loss": train_pad,
+                        "val_loss": val_pad,
+                    }
+                ).to_csv(inner_curve_csv, index=False)
+                utils.save_loss_curve_plot(
+                    train_losses=train_hist,
+                    val_losses=val_hist,
+                    out_path=inner_curve_png,
+                )
+
+            val_loader = utils.make_tensor_loader(X_val, y=None, shuffle=False)
+            train_result["model"].eval()
+            val_logits = []
+            with torch.no_grad():
+                for xb, _ in val_loader:
+                    xb = xb.to(config.DEVICE, non_blocking=True)
+                    with torch.amp.autocast(device_type="cuda", enabled=(config.DEVICE.type == "cuda")): out = train_result["model"](xb)
+                    val_logits.append(out.detach().cpu().numpy())
+            val_logits = np.concatenate(val_logits, axis=0) if val_logits else np.empty((0, 1), dtype=float)
+            val_probs = utils.logits_to_binary_probs(val_logits)
+            oof_prob_1[inner_val_idx] = val_probs[:, 1]
+            inner_epoch_counts.append(int(train_result["epochs_ran"]))
+            inner_loss_rows.append({"inner_fold": int(inner_fold_idx), "best_val_loss": float(train_result["best_val_loss"]), "epochs_ran": int(train_result["epochs_ran"] )})
+
+    valid = np.isfinite(oof_prob_1)
+    if not np.any(valid): raise ValueError("No valid OOF probabilities were produced for threshold tuning.")
+
+    y_true_thr = np.asarray(y_train_all[valid]).astype(int)
+    y_prob_thr = np.asarray(oof_prob_1[valid], dtype=float)
+    best_threshold, best_score = utils.tune_threshold_f1(y_true_thr, y_prob_thr)
+
+    threshold = best_threshold
+    threshold_score = best_score
+
+    pd.DataFrame({"y_true": y_train_all, "y_prob_1": oof_prob_1, "group_id": groups_train, "window_id": train_bundle["window_ids"][train_idx]}).to_csv(os.path.join(fold_dir, "inner_oof_predictions.csv"), index=False)
+
+    if inner_loss_rows:
+        pd.DataFrame(inner_loss_rows).to_csv(os.path.join(fold_dir, "inner_cv_summary.csv"), index=False)
+        final_epochs = max(1, int(round(float(np.mean(inner_epoch_counts)))))
+
+    X_fit = X_train_all
+    y_fit = y_train_all
+
+    if args.model in models.CLASSICAL_MODELS:
+        _, _, n_channels = X_fit.shape
+        final_scaler = StandardScaler()
+        final_scaler.fit(X_fit.reshape(-1, n_channels))
+        X_fit_scaled = final_scaler.transform(X_fit.reshape(-1, n_channels)).reshape(X_fit.shape)
+        X_test_scaled = final_scaler.transform(X_test.reshape(-1, n_channels)).reshape(X_test.shape)
+        joblib.dump(final_scaler, os.path.join(fold_model_dir, "scaler.joblib"))
+
+        if args.sensor_dropout:
+            drop_sensors = utils.sensors_from_experiment(args.train_data)
+            X_fit_src, y_fit_aug = utils.augment_sensor_dropout(
+                X_fit_scaled,
+                y_fit,
+                sensors=drop_sensors,
+                block_size=8,
+                p=config.SENSOR_DROPOUT_P,
+                max_off=config.SENSOR_DROPOUT_MAX_OFF,
+                copies=1,
+                seed=config.SEED + int(4242 + int(fold_idx)),
             )
-        print(f"  Fold s{left_out} concluido - salvo em {fold_dir}")
+        else:
+            X_fit_src, y_fit_aug = X_fit_scaled, y_fit
 
-    print(f"\nLOGO concluido! Resultados em: {base_out}")
+        X_fit_flat = X_fit_src.reshape(len(X_fit_src), -1)
+        X_test_flat = X_test_scaled.reshape(len(X_test_scaled), -1)
+        final_model = models.make_classical_model(args.model, y_fit_aug)
+        final_model.fit(X_fit_flat, y_fit_aug)
+        prob_1 = utils.estimator_binary_prob_1(final_model, X_test_flat)
+        test_probs = np.column_stack([1.0 - prob_1, prob_1])
+        joblib.dump(final_model, os.path.join(fold_model_dir, f"{fold_label}.joblib"))
+    else:
+        import torch
+
+        norm_mean, norm_std = utils.compute_channel_standardization_stats(
+            X_fit,
+            prefer_gpu=(config.GPU_NORMALIZATION and config.DEVICE.type == "cuda"),
+        )
+        utils.save_channel_standardization_stats(
+            os.path.join(fold_model_dir, "scaler_stats.npz"),
+            norm_mean,
+            norm_std,
+        )
+
+        final_result = train_neural_model(
+            args=args,
+            X_train=X_fit,
+            y_train=y_fit,
+            X_val=None,
+            y_val=None,
+            epochs=final_epochs,
+            normalizer=(norm_mean, norm_std),
+        )
+        final_model = final_result["model"]
+        test_loader = utils.make_tensor_loader(X_test, y=None, shuffle=False)
+        norm_mean_t, norm_inv_std_t = utils.make_torch_standardizer(norm_mean, norm_std, config.DEVICE)
+        final_model.eval()
+        test_logits = []
+        with torch.no_grad():
+            for xb, _ in test_loader:
+                xb = xb.to(config.DEVICE, non_blocking=True)
+                xb = utils.standardize_batch_torch(xb, norm_mean_t, norm_inv_std_t)
+                with torch.amp.autocast(device_type="cuda", enabled=(config.DEVICE.type == "cuda")): out = final_model(xb)
+                test_logits.append(out.detach().cpu().numpy())
+        test_logits = np.concatenate(test_logits, axis=0) if test_logits else np.empty((0, 1), dtype=float)
+        test_probs = utils.logits_to_binary_probs(test_logits)
+
+        pd.DataFrame({"epoch": np.arange(1, len(final_result["train_losses"]) + 1), "train_loss": final_result["train_losses"]}).to_csv(os.path.join(fold_dir, "final_fit_loss_curve.csv"), index=False)
+        utils.save_loss_curve_plot(train_losses=final_result["train_losses"], out_path=os.path.join(fold_dir, "final_fit_loss_curve.png"))
+
+        torch.save(final_model.state_dict(), os.path.join(fold_model_dir, f"{fold_label}.pt"))
+
+    metrics = utils.score_and_save_fold_outputs(y_test=y_test, test_probs=test_probs, threshold=threshold, fold_dir=fold_dir, test_bundle=test_bundle, test_idx=test_idx, experiment_for_outputs=experiment_for_outputs, sensor_status=sensor_status, save_arrays=False)
+
+    metrics["threshold_tuning_score"] = float(threshold_score)
+    metrics["inner_cv_folds"] = int(min(int(config.INNER_FOLDS), len(np.unique(groups_train))))
+    if args.model not in models.CLASSICAL_MODELS:
+        metrics["final_fit_epochs"] = int(final_epochs)
+    pd.DataFrame([metrics]).to_csv(os.path.join(fold_dir, "metrics.csv"), index=False)
+    pd.DataFrame([metrics]).to_csv(os.path.join(fold_dir, "done.csv"), index=False)
+
+    return metrics
 
 
-def build_parser():
-    parser = argparse.ArgumentParser(description="Final training CLI")
-    parser.add_argument("-scenario", required=True, choices=SCENARIO_CHOICES)
-    parser.add_argument(
-        "--model",
-        required=True,
-        choices=["CNN1D", "MLP", "LSTM", "GRU", "RF", "SVM", "XGBoost", "CatBoost", "LogisticRegression"],
+def _bundle_key_strings(bundle, indices=None):
+    window_ids = bundle.get("window_ids")
+    if window_ids is None:
+        raise ValueError("window_ids are required for stacking alignment.")
+
+    groups = bundle["groups"] if indices is None else bundle["groups"][indices]
+    windows = window_ids if indices is None else window_ids[indices]
+    return np.asarray([f"{str(g)}::{str(w)}" for g, w in zip(groups, windows)], dtype=object)
+
+
+def _build_bundle_key_index(bundle, context="bundle"):
+    keys = _bundle_key_strings(bundle)
+    key_to_idx = {}
+    for idx, key in enumerate(keys.tolist()):
+        if key in key_to_idx:
+            raise ValueError(f"Duplicate (group_id, window_id) key in {context}: {key}")
+        key_to_idx[key] = int(idx)
+    return key_to_idx
+
+
+def _prediction_frame_from_bundle(bundle, indices, prob_1, sensor_name):
+    idx = np.asarray(indices, dtype=int)
+    prob_1 = np.asarray(prob_1, dtype=float)
+    if len(idx) != len(prob_1):
+        raise ValueError(
+            f"Prediction size mismatch for {sensor_name}: indices={len(idx)}, probs={len(prob_1)}"
+        )
+
+    return pd.DataFrame(
+        {
+            "group_id": bundle["groups"][idx],
+            "window_id": np.asarray(bundle["window_ids"][idx], dtype=object).astype(str),
+            "y_true": np.asarray(bundle["y"][idx], dtype=int),
+            f"prob_{sensor_name}": prob_1,
+        }
     )
-    parser.add_argument("--epochs", type=int, default=Config.TRAINING_CONFIG["epochs"])
-    parser.add_argument(
-        "--loss",
-        choices=["weighted", "unweighted"],
-        default="weighted",
-        help="Loss weighting: 'weighted' uses inverse-frequency class weights (default); "
-             "'unweighted' uses plain CrossEntropyLoss. Unweighted results are saved to "
-             "<scenario>_NW directories.",
-    )
-    parser.add_argument(
-        "--inner-val-groups",
-        type=int,
-        default=1,
-        help="Number of training subjects held out for inner validation in each outer LOGO fold "
-             "(group-wise, default=1).",
-    )
-    parser.add_argument(
-        "--scale",
-        action="store_true",
-        default=False,
-        help="Fit a StandardScaler on the training split of each LOGO fold and apply it to "
-             "validation and test. Scaled runs are saved to <scenario>_SC directories.",
-    )
-    parser.add_argument(
-        "--no-mag",
-        dest="no_mag",
-        action="store_true",
-        default=False,
-        help="Drop the engineered magnitude channels (mag_acc, mag_gyr) from every sensor block "
-             "before training. Results are saved to <scenario>_NM directories.",
-    )
-    parser.add_argument(
-        "--only-mag",
-        dest="only_mag",
-        action="store_true",
-        default=False,
-        help="Keep only the engineered magnitude channels (mag_acc, mag_gyr), dropping raw axes. "
-             "Results are saved to <scenario>_OM directories.",
-    )
-    parser.add_argument(
-        "--sensor-dropout",
-        action="store_true",
-        default=False,
-        help="Randomly zero out complete sensor blocks during training to simulate failures.",
-    )
-    parser.add_argument(
-        "--sensor-dropout-p",
-        type=float,
-        default=0.5,
-        help="Probability of applying sensor dropout to a training sample (default=0.5).",
-    )
-    parser.add_argument(
-        "--sensor-dropout-max-off",
-        type=int,
-        default=1,
-        help="Maximum number of sensor blocks to zero per corrupted sample.",
-    )
-    parser.add_argument(
-        "--evaluate-missing",
-        action="store_true",
-        default=False,
-        help="Also evaluate missing-one-sensor conditions in fold subdirectories.",
-    )
-    return parser
 
 
+def _merge_sensor_probability_frames(sensor_frames, sensor_order, context):
+    present = [sensor for sensor in sensor_order if sensor in sensor_frames]
+    if len(present) < 2:
+        return pd.DataFrame()
+
+    first = present[0]
+    merged = sensor_frames[first].rename(columns={"y_true": f"y_true_{first}"})
+    for sensor in present[1:]:
+        merged = merged.merge(
+            sensor_frames[sensor].rename(columns={"y_true": f"y_true_{sensor}"}),
+            on=["group_id", "window_id"],
+            how="inner",
+        )
+
+    if merged.empty:
+        return merged
+
+    y_cols = [f"y_true_{sensor}" for sensor in present if f"y_true_{sensor}" in merged.columns]
+    ref_col = y_cols[0]
+    mismatch = np.zeros(len(merged), dtype=bool)
+    for col in y_cols[1:]:
+        mismatch |= merged[col].to_numpy() != merged[ref_col].to_numpy()
+
+    if np.any(mismatch):
+        sample_cols = ["group_id", "window_id", *y_cols]
+        sample = merged.loc[mismatch, sample_cols].head(10)
+        raise ValueError(
+            f"Label mismatch across sensors while {context}. Examples:\n{sample.to_string(index=False)}"
+        )
+
+    merged["y_true"] = merged[ref_col].astype(int)
+    prob_cols = [f"prob_{sensor}" for sensor in present if f"prob_{sensor}" in merged.columns]
+    return merged[["group_id", "window_id", "y_true", *prob_cols]]
 
 
+def _save_stacking_submodel_fit_artifacts(train_result, fit_dir):
+    os.makedirs(fit_dir, exist_ok=True)
 
-def main(args=None):
-    Config.setup_device()
-    Config.set_seed()
+    train_hist = list(train_result.get("train_losses") or [])
+    val_hist = list(train_result.get("val_losses") or [])
+    monitor_hist = list(train_result.get("monitor_losses") or [])
+    val_source = "none"
+    if len(val_hist) > 0:
+        val_source = "validation_loader"
+    elif len(monitor_hist) > 0:
+        val_hist = monitor_hist
+        val_source = "monitor_loader"
 
-    if args is None:
-        parser = build_parser()
-        args = parser.parse_args()
-    run_final_training(args)
+    max_len = max(len(train_hist), len(val_hist))
+
+    if max_len > 0:
+        train_pad = train_hist + [np.nan] * (max_len - len(train_hist))
+        val_pad = val_hist + [np.nan] * (max_len - len(val_hist))
+        pd.DataFrame(
+            {
+                "epoch": np.arange(1, max_len + 1),
+                "train_loss": train_pad,
+                "val_loss": val_pad,
+            }
+        ).to_csv(os.path.join(fit_dir, "loss_curve.csv"), index=False)
+        utils.save_loss_curve_plot(
+            train_losses=train_hist,
+            val_losses=(val_hist if len(val_hist) > 0 else None),
+            out_path=os.path.join(fit_dir, "loss_curve.png"),
+        )
+
+    best_val_loss = train_result.get("best_val_loss", float("nan"))
+    best_val_out = float(best_val_loss) if np.isfinite(best_val_loss) else None
+    with open(os.path.join(fit_dir, "fit_summary.json"), "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "epochs_ran": int(train_result.get("epochs_ran", len(train_hist))),
+                "best_val_loss": best_val_out,
+                "validation_source": val_source,
+            },
+            fh,
+            indent=2,
+        )
 
 
-if __name__ == "__main__":
-    main()
+def _save_stacking_submodel_eval(sensor_bundle, indices, prob_1, out_dir, sensor_name, fold_label, phase, inner_fold=None):
+    idx = np.asarray(indices, dtype=int)
+    prob_1 = np.asarray(prob_1, dtype=float)
+    if idx.size == 0 or prob_1.size == 0:
+        return None
+    if idx.size != prob_1.size:
+        raise ValueError(
+            f"Submodel eval size mismatch for {sensor_name}/{phase}: "
+            f"indices={idx.size}, prob_1={prob_1.size}"
+        )
+
+    probs = np.column_stack([1.0 - prob_1, prob_1])
+    metrics = utils.score_and_save_fold_outputs(
+        y_test=np.asarray(sensor_bundle["y"][idx], dtype=int),
+        test_probs=probs,
+        threshold=float(config.DECISION_THRESHOLD),
+        fold_dir=out_dir,
+        test_bundle=sensor_bundle,
+        test_idx=idx,
+        experiment_for_outputs=f"stacking_submodel_{sensor_name}",
+        sensor_status={"missing": [], "available": [sensor_name]},
+        save_arrays=False,
+    )
+
+    row = dict(metrics)
+    row.update(
+        {
+            "fold": str(fold_label),
+            "sensor": str(sensor_name),
+            "phase": str(phase),
+            "inner_fold": int(inner_fold) if inner_fold is not None else -1,
+            "n_samples": int(idx.size),
+        }
+    )
+    return row
+
+
+def _fit_predict_base_sensor_prob_1(
+    args,
+    sensor_name,
+    sensor_bundle,
+    fit_idx,
+    pred_idx,
+    seed_offset=0,
+    diagnostics_fit_dir=None,
+    monitor_X=None,
+    monitor_y=None,
+):
+    import src.models as models
+
+    fit_idx = np.asarray(fit_idx, dtype=int)
+    pred_idx = np.asarray(pred_idx, dtype=int)
+    if fit_idx.size == 0 or pred_idx.size == 0:
+        return np.empty(pred_idx.size, dtype=float)
+
+    X_fit = sensor_bundle["X"][fit_idx]
+    y_fit = np.asarray(sensor_bundle["y"][fit_idx], dtype=int)
+    X_pred = sensor_bundle["X"][pred_idx]
+
+    if np.unique(y_fit).size < 2:
+        constant_prob = float(np.clip(np.mean(y_fit.astype(float)), 0.0, 1.0))
+        return np.full(len(pred_idx), constant_prob, dtype=float)
+
+    if args.model in models.CLASSICAL_MODELS:
+        _, _, n_channels = X_fit.shape
+        scaler = StandardScaler()
+        scaler.fit(X_fit.reshape(-1, n_channels))
+        X_fit_scaled = scaler.transform(X_fit.reshape(-1, n_channels)).reshape(X_fit.shape)
+        X_pred_scaled = scaler.transform(X_pred.reshape(-1, n_channels)).reshape(X_pred.shape)
+
+        if args.sensor_dropout:
+            X_fit_src, y_fit_aug = utils.augment_sensor_dropout(
+                X_fit_scaled,
+                y_fit,
+                sensors=[sensor_name],
+                block_size=8,
+                p=config.SENSOR_DROPOUT_P,
+                max_off=config.SENSOR_DROPOUT_MAX_OFF,
+                copies=1,
+                seed=int(config.SEED + int(seed_offset)),
+            )
+        else:
+            X_fit_src, y_fit_aug = X_fit_scaled, y_fit
+
+        model = models.make_classical_model(args.model, y_fit_aug)
+        model.fit(X_fit_src.reshape(len(X_fit_src), -1), y_fit_aug)
+        if diagnostics_fit_dir:
+            os.makedirs(diagnostics_fit_dir, exist_ok=True)
+            with open(os.path.join(diagnostics_fit_dir, "fit_summary.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "model_family": "classical",
+                        "model": str(args.model),
+                        "train_samples": int(len(y_fit_aug)),
+                    },
+                    fh,
+                    indent=2,
+                )
+        return utils.estimator_binary_prob_1(model, X_pred_scaled.reshape(len(X_pred_scaled), -1))
+
+    import torch
+
+    norm_mean, norm_std = utils.compute_channel_standardization_stats(
+        X_fit,
+        prefer_gpu=(config.GPU_NORMALIZATION and config.DEVICE.type == "cuda"),
+    )
+    train_seed = int(config.SEED + int(seed_offset))
+    train_result = train_neural_model(
+        args=args,
+        X_train=X_fit,
+        y_train=y_fit,
+        X_val=None,
+        y_val=None,
+        epochs=config.EPOCHS,
+        normalizer=(norm_mean, norm_std),
+        drop_sensors_override=[sensor_name],
+        seed=train_seed,
+        batch_size_override=config.STACKING_BATCH_SIZE,
+        preload_to_device=bool(config.STACKING_PRELOAD_TO_GPU),
+        monitor_X=monitor_X,
+        monitor_y=monitor_y,
+    )
+
+    if diagnostics_fit_dir:
+        _save_stacking_submodel_fit_artifacts(train_result, diagnostics_fit_dir)
+
+    model = train_result["model"]
+    model.eval()
+    norm_mean_t, norm_inv_std_t = utils.make_torch_standardizer(norm_mean, norm_std, config.DEVICE)
+    pred_loader = utils.make_tensor_loader(
+        X_pred,
+        y=None,
+        shuffle=False,
+        batch_size=config.STACKING_BATCH_SIZE,
+    )
+
+    logits = []
+    with torch.no_grad():
+        for xb, _ in pred_loader:
+            xb = xb.to(config.DEVICE, non_blocking=True)
+            xb = utils.standardize_batch_torch(xb, norm_mean_t, norm_inv_std_t)
+            with torch.amp.autocast(device_type="cuda", enabled=(config.DEVICE.type == "cuda")):
+                out = model(xb)
+            logits.append(out.detach().cpu().numpy())
+
+    logits = np.concatenate(logits, axis=0) if logits else np.empty((0, 1), dtype=float)
+    probs = utils.logits_to_binary_probs(logits)
+    return probs[:, 1].astype(float, copy=False)
+
+def train_experiment(args):
+    import src.models as models
+
+    if args.model not in models.CLASSICAL_MODELS:
+        config.seed_setup()
+    run_name = utils.run_name_for_dataset(args.train_data, args)
+    output_dir = os.path.join(config.OUTPUT_ROOT, args.model, run_name)
+    model_dir = os.path.join(config.MODELS_ROOT, args.model, run_name)
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(model_dir, exist_ok=True)
+    with open(os.path.join(output_dir, "run_config.json"), "w", encoding="utf-8") as fh:
+        json.dump(vars(args), fh, indent=2)
+    done_flag = os.path.exists(os.path.join(output_dir, "DONE"))
+    summary_flag = os.path.exists(os.path.join(output_dir, "summary_metrics.csv"))
+    if done_flag or summary_flag:
+        if args.model in models.CLASSICAL_MODELS:
+            print(f"Run already complete at: {output_dir} - skipping.")
+            return output_dir
+
+        existing_inner_curves = glob.glob(os.path.join(output_dir, "fold_*", "inner_loss_curves", "inner_fold_*_loss_curve.csv"))
+        if existing_inner_curves:
+            print(f"Run already complete at: {output_dir} - skipping.")
+            return output_dir
+
+        print(f"[REBUILD] Existing run found at {output_dir}, but inner CV loss curves are missing. Recomputing neural fold artifacts.")
+
+    bundle = utils.load_bundle(args.train_data, args)
+    logo = LeaveOneGroupOut()
+    logo_splits = list(logo.split(bundle["X"], bundle["y"], bundle["groups"]))
+    utils._log_header(
+        "individual_generalization::train",
+        model=args.model,
+        dataset=args.train_data,
+        run_name=run_name,
+        sensor_dropout=bool(args.sensor_dropout),
+        ablation=(args.ablation or "none"),
+        logo_folds=len(logo_splits),
+    )
+    rows = []
+    for fold_idx, (train_idx, test_idx) in enumerate(logo_splits):
+        left_out = bundle["groups"][test_idx[0]]
+        fold_label = f"s{left_out}"
+        utils._log_fold("LOGO", fold_idx, len(logo_splits), left_out=left_out, train=len(train_idx), test=len(test_idx))
+        fold_dir = os.path.join(output_dir, f"fold_{fold_label}")
+        fold_model_dir = os.path.join(model_dir, f"fold_{fold_label}")
+        row = fit_and_eval_fold(args, bundle, train_idx, test_idx, fold_idx, fold_dir, fold_model_dir, bundle["experiment"], {"missing": [], "available": utils.sensors_from_experiment(bundle["experiment"])})
+        row["fold"] = fold_label
+        rows.append(row)
+    if rows:
+        pd.DataFrame(rows).to_csv(os.path.join(output_dir, "summary_metrics.csv"), index=False)
+    open(os.path.join(output_dir, "DONE"), "w").close()
+    with open(os.path.join(output_dir, "status.json"), "w", encoding="utf-8") as fh:
+        json.dump({"mode": "train", "n_folds": len(rows)}, fh, indent=2)
+    return output_dir
+
+def train_stacking_experiment(args):
+    import src.models as models
+
+    if args.model not in models.CLASSICAL_MODELS:
+        config.seed_setup()
+
+    source_bundle = utils.load_bundle(args.train_data, args)
+    if source_bundle.get("window_ids") is None:
+        raise ValueError("Stacking requires window_ids in the source dataset.")
+
+    source_sensors = list(utils.sensors_from_experiment(args.train_data))
+    if len(source_sensors) < 2:
+        raise ValueError(
+            "Stacking requires a fused training dataset with at least 2 sensors "
+            "(e.g., chest_left, chest_right, left_right, chest_left_right)."
+        )
+    ensemble_sensors = list(source_sensors)
+
+    run_name = f"stacking_{utils.run_name_for_dataset(args.train_data, args)}"
+    output_dir = os.path.join(config.OUTPUT_ROOT, args.model, run_name)
+    model_dir = os.path.join(config.MODELS_ROOT, args.model, run_name)
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(model_dir, exist_ok=True)
+    with open(os.path.join(output_dir, "run_config.json"), "w", encoding="utf-8") as fh:
+        json.dump(vars(args), fh, indent=2)
+
+    done_flag = os.path.exists(os.path.join(output_dir, "DONE"))
+    summary_flag = os.path.exists(os.path.join(output_dir, "summary_metrics.csv"))
+    if done_flag or summary_flag:
+        rebuild_reasons = []
+        submodel_summary = os.path.join(output_dir, "summary_metrics_submodels.csv")
+        if bool(config.STACKING_SAVE_SUBMODEL_ARTIFACTS) and not os.path.exists(submodel_summary):
+            rebuild_reasons.append("submodel diagnostics are missing")
+
+        if bool(getattr(config, "STACKING_META_SAVE_VALIDATION_CURVE", True)):
+            meta_curve_files = glob.glob(
+                os.path.join(
+                    output_dir,
+                    "fold_*",
+                    "stacking_train",
+                    "meta_diagnostics",
+                    "meta_validation_loss_curve.csv",
+                )
+            )
+            if len(meta_curve_files) == 0:
+                rebuild_reasons.append("meta validation curves are missing")
+
+        if not rebuild_reasons:
+            print(f"Run already complete at: {output_dir} - skipping.")
+            return output_dir
+
+        print(
+            f"[REBUILD] Existing stacking run found at {output_dir}, but "
+            + "; ".join(rebuild_reasons)
+            + ". Recomputing stacking outputs."
+        )
+
+    source_keys_all = _bundle_key_strings(source_bundle)
+
+    sensor_bundles = {}
+    sensor_key_maps = {}
+    for sensor_name in ensemble_sensors:
+        sensor_bundle = utils.load_bundle(sensor_name, args)
+        if sensor_bundle.get("window_ids") is None:
+            raise ValueError(f"Stacking requires window_ids for sensor dataset '{sensor_name}'.")
+        sensor_bundles[sensor_name] = sensor_bundle
+        sensor_key_maps[sensor_name] = _build_bundle_key_index(sensor_bundle, context=f"sensor={sensor_name}")
+
+    rows = []
+    submodel_rows = []
+    logo = LeaveOneGroupOut()
+    splits = list(logo.split(source_bundle["X"], source_bundle["y"], source_bundle["groups"]))
+    utils._log_header(
+        "stacking::meta_train",
+        model=args.model,
+        source_dataset=args.train_data,
+        ensemble_sensors=",".join(ensemble_sensors),
+        run_name=run_name,
+        sensor_dropout=bool(args.sensor_dropout),
+        logo_folds=len(splits),
+    )
+    for fold_idx, (_, test_idx_source) in enumerate(splits):
+        left_out = source_bundle["groups"][test_idx_source[0]]
+        fold_label = f"s{left_out}"
+        utils._log_fold("LOGO", fold_idx, len(splits), left_out=left_out, source_test=len(test_idx_source))
+
+        outer_test_keys = set(source_keys_all[test_idx_source].tolist())
+        outer_train_keys = set(source_keys_all.tolist()) - outer_test_keys
+
+        sensor_train_frames = {}
+        sensor_test_frames = {}
+
+        for sensor_pos, sensor_name in enumerate(ensemble_sensors):
+            sensor_bundle = sensor_bundles[sensor_name]
+            key_to_idx = sensor_key_maps[sensor_name]
+
+            sensor_train_idx = np.asarray(
+                sorted(key_to_idx[key] for key in outer_train_keys if key in key_to_idx),
+                dtype=int,
+            )
+            sensor_test_idx = np.asarray(
+                sorted(key_to_idx[key] for key in outer_test_keys if key in key_to_idx),
+                dtype=int,
+            )
+
+            if sensor_train_idx.size == 0 or sensor_test_idx.size == 0:
+                continue
+
+            groups_outer_train = sensor_bundle["groups"][sensor_train_idx]
+            unique_outer_train_groups = np.unique(groups_outer_train)
+            n_inner = min(int(config.INNER_FOLDS), len(unique_outer_train_groups))
+            if n_inner < 2:
+                continue
+
+            X_outer_train = sensor_bundle["X"][sensor_train_idx]
+            y_outer_train = sensor_bundle["y"][sensor_train_idx]
+            inner_cv = GroupKFold(n_splits=n_inner)
+            oof_prob_1 = np.full(len(sensor_train_idx), np.nan, dtype=float)
+
+            for inner_idx, (inner_fit_local, inner_val_local) in enumerate(
+                inner_cv.split(X_outer_train, y_outer_train, groups=groups_outer_train)
+            ):
+                fit_idx_sensor = sensor_train_idx[inner_fit_local]
+                val_idx_sensor = sensor_train_idx[inner_val_local]
+                seed_offset = int((fold_idx * 10000) + (sensor_pos * 1000) + inner_idx)
+
+                submodel_base_dir = None
+                diagnostics_fit_dir = None
+                if bool(config.STACKING_SAVE_SUBMODEL_ARTIFACTS):
+                    submodel_base_dir = os.path.join(
+                        output_dir,
+                        f"fold_{fold_label}",
+                        "submodels",
+                        f"sensor_{sensor_name}",
+                        f"inner_{int(inner_idx)}",
+                    )
+                    diagnostics_fit_dir = os.path.join(submodel_base_dir, "fit")
+
+                probs_val = _fit_predict_base_sensor_prob_1(
+                    args=args,
+                    sensor_name=sensor_name,
+                    sensor_bundle=sensor_bundle,
+                    fit_idx=fit_idx_sensor,
+                    pred_idx=val_idx_sensor,
+                    seed_offset=seed_offset,
+                    diagnostics_fit_dir=diagnostics_fit_dir,
+                    monitor_X=(sensor_bundle["X"][val_idx_sensor] if bool(config.STACKING_SAVE_SUBMODEL_ARTIFACTS) else None),
+                    monitor_y=(sensor_bundle["y"][val_idx_sensor] if bool(config.STACKING_SAVE_SUBMODEL_ARTIFACTS) else None),
+                )
+                oof_prob_1[inner_val_local] = probs_val
+
+                if submodel_base_dir is not None:
+                    row = _save_stacking_submodel_eval(
+                        sensor_bundle=sensor_bundle,
+                        indices=val_idx_sensor,
+                        prob_1=probs_val,
+                        out_dir=os.path.join(submodel_base_dir, "eval_inner_val"),
+                        sensor_name=sensor_name,
+                        fold_label=fold_label,
+                        phase="inner_val",
+                        inner_fold=inner_idx,
+                    )
+                    if row is not None:
+                        row["seed_offset"] = int(seed_offset)
+                        row["fit_samples"] = int(len(fit_idx_sensor))
+                        row["pred_samples"] = int(len(val_idx_sensor))
+                        submodel_rows.append(row)
+
+            valid_oof = np.isfinite(oof_prob_1)
+            if np.any(valid_oof):
+                sensor_train_frames[sensor_name] = _prediction_frame_from_bundle(
+                    sensor_bundle,
+                    sensor_train_idx[valid_oof],
+                    oof_prob_1[valid_oof],
+                    sensor_name,
+                )
+
+            seed_offset_test = int((fold_idx * 10000) + (sensor_pos * 1000) + 999)
+
+            submodel_outer_dir = None
+            diagnostics_outer_fit_dir = None
+            if bool(config.STACKING_SAVE_SUBMODEL_ARTIFACTS):
+                submodel_outer_dir = os.path.join(
+                    output_dir,
+                    f"fold_{fold_label}",
+                    "submodels",
+                    f"sensor_{sensor_name}",
+                    "outer_train_fit",
+                )
+                diagnostics_outer_fit_dir = os.path.join(submodel_outer_dir, "fit")
+
+            probs_test = _fit_predict_base_sensor_prob_1(
+                args=args,
+                sensor_name=sensor_name,
+                sensor_bundle=sensor_bundle,
+                fit_idx=sensor_train_idx,
+                pred_idx=sensor_test_idx,
+                seed_offset=seed_offset_test,
+                diagnostics_fit_dir=diagnostics_outer_fit_dir,
+            )
+            sensor_test_frames[sensor_name] = _prediction_frame_from_bundle(
+                sensor_bundle,
+                sensor_test_idx,
+                probs_test,
+                sensor_name,
+            )
+
+            if submodel_outer_dir is not None:
+                row = _save_stacking_submodel_eval(
+                    sensor_bundle=sensor_bundle,
+                    indices=sensor_test_idx,
+                    prob_1=probs_test,
+                    out_dir=os.path.join(submodel_outer_dir, "eval_outer_test"),
+                    sensor_name=sensor_name,
+                    fold_label=fold_label,
+                    phase="outer_test",
+                    inner_fold=None,
+                )
+                if row is not None:
+                    row["seed_offset"] = int(seed_offset_test)
+                    row["fit_samples"] = int(len(sensor_train_idx))
+                    row["pred_samples"] = int(len(sensor_test_idx))
+                    submodel_rows.append(row)
+
+        if len(sensor_train_frames) < 2 or len(sensor_test_frames) < 2:
+            continue
+
+        meta_train = _merge_sensor_probability_frames(
+            sensor_train_frames,
+            sensor_order=ensemble_sensors,
+            context=f"building stacking meta-train fold {fold_label}",
+        )
+        meta_test = _merge_sensor_probability_frames(
+            sensor_test_frames,
+            sensor_order=ensemble_sensors,
+            context=f"building stacking meta-test fold {fold_label}",
+        )
+
+        if meta_train.empty or meta_test.empty:
+            continue
+
+        prob_cols = [c for c in meta_train.columns if c.startswith("prob_") and c in meta_test.columns]
+        if len(prob_cols) < 2:
+            continue
+
+        X_meta_train = meta_train[prob_cols].to_numpy(dtype=float)
+        y_meta_train = meta_train["y_true"].to_numpy(dtype=int)
+        g_meta_train = meta_train["group_id"].to_numpy()
+        X_meta_test = meta_test[prob_cols].to_numpy(dtype=float)
+        y_meta_test = meta_test["y_true"].to_numpy(dtype=int)
+        if len(np.unique(y_meta_train)) < 2:
+            continue
+
+        fold_output_dir = os.path.join(output_dir, f"fold_{fold_label}", "stacking_train")
+        os.makedirs(fold_output_dir, exist_ok=True)
+        fold_model_dir = os.path.join(model_dir, f"fold_{fold_label}")
+        os.makedirs(fold_model_dir, exist_ok=True)
+
+        if bool(getattr(config, "STACKING_META_SAVE_VALIDATION_CURVE", True)):
+            _save_meta_validation_curve(
+                X=X_meta_train,
+                y=y_meta_train,
+                groups=g_meta_train,
+                out_dir=os.path.join(fold_output_dir, "meta_diagnostics"),
+                seed=int(config.SEED + int(fold_idx) * 1000),
+            )
+
+        X_meta_train_fit = np.asarray(X_meta_train, dtype=float)
+        y_meta_train_fit = np.asarray(y_meta_train, dtype=int)
+
+        meta_dropout_applied = False
+        meta_dropout_p = None
+        meta_dropout_max_off = None
+        if args.sensor_dropout:
+            meta_dropout_applied = True
+            meta_dropout_p = float(config.SENSOR_DROPOUT_P)
+            meta_dropout_max_off = int(min(config.SENSOR_DROPOUT_MAX_OFF, len(prob_cols)))
+            X_meta_train_fit, y_meta_train_fit = utils._augment_meta_feature_dropout(
+                X=X_meta_train_fit,
+                y=y_meta_train_fit,
+                p=meta_dropout_p,
+                max_off=meta_dropout_max_off,
+                copies=1,
+                seed=config.SEED + int(fold_idx),
+            )
+
+        meta_model = models.make_classical_model("LogisticRegression", y_meta_train_fit)
+        meta_model.fit(X_meta_train_fit, y_meta_train_fit)
+        meta_model_type = "sklearn_logistic_regression_lbfgs"
+
+        best_thr, best_score, threshold_tuning_strategy = _tune_meta_threshold_with_group_oof(
+            X=X_meta_train,
+            y=y_meta_train,
+            groups=g_meta_train,
+        )
+        p_test = _predict_meta_prob_1(meta_model, X_meta_test)
+        stacking_probs = np.column_stack([1.0 - p_test, p_test])
+
+        joblib.dump(meta_model, os.path.join(fold_model_dir, "meta_stacking.joblib"))
+        with open(os.path.join(fold_output_dir, "meta_config.json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "threshold": float(best_thr),
+                "threshold_tuning_score": float(best_score),
+                "threshold_tuning_strategy": threshold_tuning_strategy,
+                "features": prob_cols,
+                "meta_model_type": meta_model_type,
+                "meta_feature_sensor_dropout": {
+                    "enabled": bool(meta_dropout_applied),
+                    "p": meta_dropout_p,
+                    "max_off": meta_dropout_max_off,
+                },
+            }, fh, indent=2)
+
+        stacking_bundle = {
+            "groups": meta_test["group_id"].to_numpy(),
+            "window_ids": meta_test["window_id"].astype(object).to_numpy(),
+        }
+        metrics = utils.score_and_save_fold_outputs(
+            y_test=y_meta_test,
+            test_probs=stacking_probs,
+            threshold=best_thr,
+            fold_dir=fold_output_dir,
+            test_bundle=stacking_bundle,
+            test_idx=np.arange(len(meta_test), dtype=int),
+            experiment_for_outputs=args.train_data,
+            sensor_status={"missing": [], "available": ensemble_sensors},
+            save_arrays=False,
+        )
+        metrics["fold"] = fold_label
+        metrics["method"] = "stacking_train"
+        metrics["threshold_tuning_score"] = float(best_score)
+        rows.append(metrics)
+
+    if rows:
+        pd.DataFrame(rows).to_csv(os.path.join(output_dir, "summary_metrics_stacking_train.csv"), index=False)
+        pd.DataFrame(rows).to_csv(os.path.join(output_dir, "summary_metrics.csv"), index=False)
+    if submodel_rows:
+        pd.DataFrame(submodel_rows).to_csv(os.path.join(output_dir, "summary_metrics_submodels.csv"), index=False)
+    open(os.path.join(output_dir, "DONE"), "w").close()
+    with open(os.path.join(output_dir, "status.json"), "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "mode": "stacking_train",
+                "n_folds": len(rows),
+                "source_sensors": source_sensors,
+                "sensors_used": ensemble_sensors,
+                "source_dataset": args.train_data,
+            },
+            fh,
+            indent=2,
+        )
+
+    return output_dir

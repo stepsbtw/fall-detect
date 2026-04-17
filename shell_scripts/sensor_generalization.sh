@@ -1,29 +1,31 @@
-models=(MLP)
-scenarios=(left_T right_T chest_T left_right_T chest_left_T chest_right_T chest_left_right_T)
+MODELS=(MLP CNN1D LogisticRegression XGBoost)
 
-for model in "${models[@]}"; do
+for model in "${MODELS[@]}"; do
+    for test_dataset in chest left right; do
+        for train_dataset in chest left right; do
+            [[ "$train_dataset" == "$test_dataset" ]] && continue
+            python run.py --experiment cross_sensor --model "$model" --train_data "$train_dataset" --test_data "$test_dataset"
+        done
+    done
 
-    python run.py --cross_sensor --model "$model" --scenario chest_T --scale
-    python run.py --cross_sensor --model "$model" --scenario left_T --scale
-    python run.py --cross_sensor --model "$model" --scenario right_T --scale
+    for test_dataset in chest left right chest_left chest_right left_right; do
+        python run.py --experiment missing_sensor --model "$model" --train_data chest_left_right --test_data "$test_dataset"
+        python run.py --experiment missing_sensor --model "$model" --train_data chest_left_right --test_data "$test_dataset" --sensor_dropout
+    done
 
-    #python run.py --multisensor --model "$model" --mode ensemble --scale
-    #python run.py --multisensor --model "$model" --mode stacking --scale
+    for test_dataset in chest left; do
+        python run.py --experiment missing_sensor --model "$model" --train_data chest_left --test_data "$test_dataset"
+        python run.py --experiment missing_sensor --model "$model" --train_data chest_left --test_data "$test_dataset" --sensor_dropout
+    done
 
-    python run.py --fused_missing --model "$model" --scenario chest_left_T --test_scenario chest_T --scale
-    python run.py --fused_missing --model "$model" --scenario chest_left_T --test_scenario left_T --scale
+    for test_dataset in chest right; do
+        python run.py --experiment missing_sensor --model "$model" --train_data chest_right --test_data "$test_dataset"
+        python run.py --experiment missing_sensor --model "$model" --train_data chest_right --test_data "$test_dataset" --sensor_dropout
+    done
 
-    python run.py --fused_missing --model "$model" --scenario chest_right_T --test_scenario chest_T --scale
-    python run.py --fused_missing --model "$model" --scenario chest_right_T --test_scenario right_T --scale
-
-    python run.py --fused_missing --model "$model" --scenario left_right_T --test_scenario left_T --scale
-    python run.py --fused_missing --model "$model" --scenario left_right_T --test_scenario right_T --scale
-
-    python run.py --fused_missing --model "$model" --scenario chest_left_right_T --test_scenario chest_T --scale
-    python run.py --fused_missing --model "$model" --scenario chest_left_right_T --test_scenario left_T --scale
-    python run.py --fused_missing --model "$model" --scenario chest_left_right_T --test_scenario right_T --scale
-    python run.py --fused_missing --model "$model" --scenario chest_left_right_T --test_scenario chest_left_T --scale
-    python run.py --fused_missing --model "$model" --scenario chest_left_right_T --test_scenario chest_right_T --scale
-    python run.py --fused_missing --model "$model" --scenario chest_left_right_T --test_scenario left_right_T --scale
-
+    for test_dataset in left right; do
+        python run.py --experiment missing_sensor --model "$model" --train_data left_right --test_data "$test_dataset"
+        python run.py --experiment missing_sensor --model "$model" --train_data left_right --test_data "$test_dataset" --sensor_dropout
+    done
 done
+

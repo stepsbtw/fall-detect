@@ -10,6 +10,8 @@
 /ok_output
 /models
 
+/raw
+
 *.png
 *.jpg
 *.jpeg

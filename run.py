@@ -1,291 +1,138 @@
 import argparse
-from argparse import Namespace
-from pathlib import Path
+import os
+import sys
 
-import numpy as np
+ROOT_DIR = os.path.dirname(__file__)
+SRC_DIR = os.path.join(ROOT_DIR, "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
 
-from src.config import Config
-from src.train import main as train_main
-from src.validation import main as validation_main
-from src.test import run_cross_sensor_eval, evaluate_padded_fused_model
-from src.validation import run_ensemble, run_stacking
-from src.analysis import main as analysis_main
-
-
-CLASSICAL_MODELS = sorted(Config.CLASSICAL_MODELS)
-ALL_MODELS = list(Config.DEFAULT_PARAMS.keys())
-SCENARIOS = list(Config.SCENARIOS.keys())
-
-
-def is_classical(model: str) -> bool:
-    return model in CLASSICAL_MODELS
+BASE_DATASETS = (
+    "chest",
+    "left",
+    "right",
+    "chest_left",
+    "chest_right",
+    "left_right",
+    "chest_left_right",
+)
+DATASET_ROOT = os.path.join(ROOT_DIR, "dataset")
 
 
-def expected_folds(scenario: str) -> int:
-    groups_file = Path(Config.DATA_PATH) / Config.SCENARIOS[scenario][0] / "labels" / "groups.npy"
-    if groups_file.exists():
-        return int(np.unique(np.load(groups_file)).size)
-    return Config.N_INDIVIDUALS
+def _discover_datasets():
+    names = set(BASE_DATASETS)
+    if os.path.isdir(DATASET_ROOT):
+        for entry in os.listdir(DATASET_ROOT):
+            candidate = os.path.join(DATASET_ROOT, entry)
+            if not os.path.isdir(candidate):
+                continue
+            time_path = os.path.join(candidate, "data", "data_time_domain.npy")
+            labels_path = os.path.join(candidate, "labels", "labels.npy")
+            if os.path.isfile(time_path) and os.path.isfile(labels_path):
+                names.add(entry)
+    return tuple(sorted(names))
 
 
-def require_args(args, *names):
-    missing = [name for name in names if getattr(args, name, None) in (None, "")]
-    if missing:
-        formatted = ", ".join(f"--{name}" for name in missing)
-        raise ValueError(f"Missing required argument(s) for this mode: {formatted}")
+DATASETS = _discover_datasets()
+OUTPUT_ROOT = os.path.join(ROOT_DIR, "output")
 
 
+def _run_name_for_dataset(dataset_name, args):
+    from src.config import DEFAULT_ABLATION
+    from src.utils import build_run_name
 
-
-def _train_output_dir(args):
-    from src.sensor_fusion import scenario_output_name
-    return Config.get_output_dir(
-        args.model,
-        scenario_output_name(
-            args.model,
-            args.scenario,
-            loss=args.loss,
-            inner_val_groups=args.inner_val_groups,
-            scale=args.scale,
-            no_mag=args.no_mag,
-            only_mag=args.only_mag,
-            sensor_dropout=args.sensor_dropout,
-            sensor_dropout_p=args.sensor_dropout_p,
-            sensor_dropout_max_off=args.sensor_dropout_max_off,
-        ),
+    return build_run_name(
+        dataset_name,
+        sensor_dropout=getattr(args, "sensor_dropout", False),
+        ablation=getattr(args, "ablation", DEFAULT_ABLATION),
     )
 
+def _print_run_header(args, output_dir):
+    print("=" * 90)
+    print("[RUN] dispatch")
+    print(f"  - experiment: {args.experiment}")
+    print(f"  - model: {args.model}")
+    if args.train_data:
+        print(f"  - train_data: {args.train_data}")
+    if args.test_data:
+        print(f"  - test_data: {args.test_data}")
+    print(f"  - sensor_dropout: {bool(args.sensor_dropout)}")
+    print(f"  - output_dir: {output_dir}")
+    print("=" * 90)
 
-def _cross_sensor_output_dirs(args):
-    from src.sensor_fusion import scenario_output_name
-    train_tag = scenario_output_name(
-        args.model,
-        args.scenario,
-        loss=args.loss,
-        inner_val_groups=args.inner_val_groups,
-        scale=args.scale,
-        no_mag=args.no_mag,
-        only_mag=args.only_mag,
-    )
-    allowed_pairs = {
-        "left_T": ["chest_T", "right_T"],
-        "right_T": ["chest_T", "left_T"],
-        "chest_T": ["left_T", "right_T"],
-    }
-    targets = []
-    for test_scenario in Config.SCENARIOS:
-        if test_scenario == args.scenario:
-            continue
-        if args.scenario in allowed_pairs and test_scenario not in allowed_pairs[args.scenario]:
-            continue
-        targets.append(Config.get_output_dir(args.model, f"cross_sensor_{train_tag}_to_{test_scenario}"))
-    return targets
+def _output_dir_for_args(args):
+    if args.experiment == "train":
+        run_name = _run_name_for_dataset(args.train_data, args)
+    elif args.experiment == "bagging":
+        run_name = f"bagging_{_run_name_for_dataset(args.test_data, args)}"
+    elif args.experiment == "stacking":
+        run_name = f"stacking_{_run_name_for_dataset(args.train_data, args)}"
+    elif args.experiment == "cross_sensor":
+        run_name = f"cross_sensor_{_run_name_for_dataset(args.train_data, args)}_to_{args.test_data}"
+    elif args.experiment == "missing_sensor":
+        train_run_name = _run_name_for_dataset(args.train_data, args)
+        run_name = f"missing_sensor_{train_run_name}_on_{args.test_data}"
 
-
-def _fused_missing_output_dir(args):
-    from src.sensor_fusion import scenario_output_name
-    train_out = scenario_output_name(
-        args.model,
-        args.scenario,
-        loss=args.loss,
-        inner_val_groups=args.inner_val_groups,
-        scale=args.scale,
-        no_mag=args.no_mag,
-        only_mag=args.only_mag,
-        sensor_dropout=args.sensor_dropout,
-        sensor_dropout_p=args.sensor_dropout_p,
-        sensor_dropout_max_off=args.sensor_dropout_max_off,
-    )
-    name = f"padded_eval_{train_out}_on_{args.test_scenario}"
-    if getattr(args, "calibration", "none") != "none":
-        name += f"_CAL_{args.calibration}"
-    if getattr(args, "tune_threshold", False):
-        name += f"_TT_{args.threshold_metric}"
     else:
-        name += f"_TH_{str(float(args.threshold)).replace('.', 'p')}"
-    return Config.get_output_dir(args.model, name)
+        raise ValueError(f"Unknown experiment: {args.experiment}")
 
+    return os.path.join(OUTPUT_ROOT, args.model, run_name)
 
-def _multisensor_output_dirs(args):
-    modes = [args.mode] if args.mode != "all" else ["ensemble", "stacking"]
-    return [Config.get_output_dir(args.model, f"multisensor_{mode}_{args.tag}") for mode in modes]
-
-def run_train(args):
-    require_args(args, "model", "scenario")
-    output_dir = _train_output_dir(args)
-    if Config.is_run_complete(output_dir):
-        print(f">> TRAIN already complete at {output_dir} - skipping")
-        return
-    print(f">> TRAIN | model={args.model} | scenario={args.scenario}")
-    train_main(args)
-
-
-def run_cross_sensor(args):
-    require_args(args, "model", "scenario")
-    output_dirs = _cross_sensor_output_dirs(args)
-    if output_dirs and all(Config.is_run_complete(path) for path in output_dirs):
-        print(">> CROSS SENSOR already complete for all target scenarios - skipping")
-        return
-    print(f">> CROSS SENSOR | model={args.model} | scenario={args.scenario}")
-
-    run_cross_sensor_eval(
-        train_scenario=args.scenario,
-        model_type=args.model,
-        loss_type=args.loss,
-        epochs=args.epochs,
-        scale=args.scale,
-        no_mag=args.no_mag,
-        only_mag=args.only_mag,
-        inner_val_groups=args.inner_val_groups,
-    )
-
-
-def run_fused_missing(args):
-    require_args(args, "model", "scenario", "test_scenario")
-    output_dir = _fused_missing_output_dir(args)
-    if Config.is_run_complete(output_dir):
-        print(f">> FUSED MISSING already complete at {output_dir} - skipping")
-        return
-    print(f">> FUSED MISSING | model={args.model}")
-
-    evaluate_padded_fused_model(
-        model_type=args.model,
-        train_scenario=args.scenario,
-        test_scenario=args.test_scenario,
-        loss=args.loss,
-        inner_val_groups=args.inner_val_groups,
-        scale=args.scale,
-        no_mag=args.no_mag,
-        only_mag=args.only_mag,
-        sensor_dropout=args.sensor_dropout,
-        sensor_dropout_p=args.sensor_dropout_p,
-        sensor_dropout_max_off=args.sensor_dropout_max_off,
-        threshold=args.threshold,
-        tune_threshold=args.tune_threshold,
-        threshold_metric=args.threshold_metric,
-        calibration=args.calibration,
-    )
-
-
-def run_multisensor(args):
-    require_args(args, "model")
-    output_dirs = _multisensor_output_dirs(args)
-    if output_dirs and all(Config.is_run_complete(path) for path in output_dirs):
-        print(f">> MULTISENSOR already complete for mode={args.mode} - skipping")
-        return
-    print(f">> MULTISENSOR | mode={args.mode} | model={args.model}")
-
-    common_kwargs = dict(
-        model=args.model,
-        loss=args.loss,
-        inner_val_groups=args.inner_val_groups,
-        scale=args.scale,
-        no_mag=args.no_mag,
-        only_mag=args.only_mag,
-        threshold=args.threshold,
-        tag=args.tag,
-    )
-
-    if args.mode == "ensemble":
-        run_ensemble(**common_kwargs)
-    elif args.mode == "stacking":
-        run_stacking(**common_kwargs)
-    elif args.mode == "all":
-        run_ensemble(**common_kwargs)
-        run_stacking(**common_kwargs)
-
-
-def run_analysis(args):
-    print(f">> ANALYZE | base_dir={args.base_dir} | output_dir={args.output_dir}")
-    analysis_args = Namespace(
-        mode="analyze",
-        base_dir=args.base_dir,
-        output_dir=args.output_dir,
-    )
-    analysis_main(analysis_args)
-
-
-def build_parser():
-    parser = argparse.ArgumentParser()
-
-    # Core
-    parser.add_argument("--train", action="store_true")
-    parser.add_argument("--nested", action="store_true")
-    parser.add_argument("--cross_sensor", action="store_true")
-    parser.add_argument("--fused_missing", action="store_true")
-    parser.add_argument("--analyze", action="store_true")
-
-    # Multisensor
-    parser.add_argument("--multisensor", action="store_true")
-    parser.add_argument("--mode", choices=["ensemble", "stacking", "all"], default="all")
-    parser.add_argument("--tag", type=str, default="default")
-
-    # Filters
-    parser.add_argument("--model", choices=ALL_MODELS)
-    parser.add_argument("--scenario", choices=SCENARIOS)
-    parser.add_argument("--test_scenario", choices=SCENARIOS)
-
-    # Analysis config
-    parser.add_argument("--base_dir", type=str, default="output")
-    parser.add_argument("--output_dir", type=str, default="output/analysis")
-
-    # Training config
-    parser.add_argument("--epochs", type=int, default=Config.TRAINING_CONFIG["epochs"])
-    parser.add_argument("--loss", type=str, default="weighted")
-    parser.add_argument("--inner_val_groups", type=int, default=1)
-
-    # Data flags
-    parser.add_argument("--scale", action="store_true")
-    parser.add_argument("--no_mag", action="store_true")
-    parser.add_argument("--only_mag", action="store_true")
-
-    # Sensor dropout
-    parser.add_argument("--sensor_dropout", action="store_true")
-    parser.add_argument("--sensor_dropout_p", type=float, default=0.5)
-    parser.add_argument("--sensor_dropout_max_off", type=int, default=1)
-
-    parser.add_argument("--threshold", type=float, default=0.5)
-    parser.add_argument("--tune_threshold", action="store_true")
-    parser.add_argument("--threshold_metric", choices=["f1", "balanced_accuracy", "youden"], default="f1")
-    parser.add_argument("--calibration", choices=["none", "temperature", "platt", "isotonic"], default="none")
-
-    return parser
-
+def _run_is_complete(args):
+    output_dir = _output_dir_for_args(args)
+    done_flag = os.path.join(output_dir, "DONE")
+    summary_csv = os.path.join(output_dir, "summary_metrics.csv")
+    return output_dir, (os.path.exists(done_flag) or os.path.exists(summary_csv))
 
 def main():
-    parser = build_parser()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--experiment", choices=["train", "cross_sensor", "missing_sensor", "bagging", "stacking"], required=True)
+    parser.add_argument("--model", choices=["MLP", "CNN1D", "LSTM", "GRU", "LinearModel", "LogisticRegression", "SVM", "DecisionTree", "XGBoost", "LightGBM", "RandomForest"], required=True)
+
+    parser.add_argument("--train_data", choices=DATASETS)
+    parser.add_argument("--test_data", choices=DATASETS)
+
+    parser.add_argument("--sensor_dropout", action="store_true")
+
+    parser.add_argument("--ablation", choices=["acc", "gyr", "acc_gyr", "acc_gyr_magacc_maggyr", "magacc_maggyr", "acc_magacc", "gyr_maggyr", "magacc", "maggyr"], default="acc_gyr_magacc_maggyr")
+
     args = parser.parse_args()
 
-    selected_actions = [
-        args.train,
-        args.nested,
-        args.cross_sensor,
-        args.fused_missing,
-        args.multisensor,
-        args.analyze,
-    ]
-    if not any(selected_actions):
-        parser.error("select at least one action: --train, --nested, --cross_sensor, --fused_missing, --multisensor, or --analyze")
+    output_dir, is_complete = _run_is_complete(args)
+    _print_run_header(args, output_dir)
+    if is_complete:
+        print(f"Run already complete at: {output_dir} - skipping.")
+        return
 
-    if args.train:
-        run_train(args)
+    if args.experiment == "train":
+        if args.train_data is None: raise ValueError("--train_data is required for train")
+        from train import train_experiment
 
-    if args.cross_sensor:
-        run_cross_sensor(args)
+        train_experiment(args)
 
-    if args.fused_missing:
-        run_fused_missing(args)
+    elif args.experiment == "cross_sensor":
+        if args.test_data is None: raise ValueError("--test_data is required for cross_sensor")
+        from eval import eval_cross_sensor_experiment
 
-    if args.multisensor:
-        run_multisensor(args)
+        eval_cross_sensor_experiment(args)
 
-    if args.nested:
-        require_args(args, "model", "scenario")
-        print(">> NESTED validation")
-        validation_main(args)
+    elif args.experiment == "missing_sensor":
+        if args.test_data is None: raise ValueError("--test_data is required for missing_sensor")
+        from eval import eval_missing_sensor_experiment
 
-    if args.analyze:
-        run_analysis(args)
+        eval_missing_sensor_experiment(args)
+
+    elif args.experiment == "bagging":
+        if args.test_data is None: raise ValueError("--test_data is required for bagging")
+        from eval import eval_bagging_experiment
+
+        eval_bagging_experiment(args)
+
+    elif args.experiment == "stacking":
+        if args.train_data is None: raise ValueError("--train_data is required for stacking")
+        from train import train_stacking_experiment
+
+        train_stacking_experiment(args)
 
 
 if __name__ == "__main__":
