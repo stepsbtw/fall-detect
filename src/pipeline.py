@@ -41,7 +41,7 @@ from src.config import (
     TRAINING_CONFIG,
     setup_runtime,
 )
-from models import create_model, make_classical_model
+from src.models import create_model, make_classical_model
 
 
 def parse_args():
